@@ -2,7 +2,8 @@ import { startCamera } from './camera.js';
 import { computeRegion, sampleGrid } from './detection.js';
 import { SCAN_STEPS, toFaceletString, validate } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
-import { drawGuide, drawMove, drawScanIndicator } from './overlay.js';
+import { drawGuide, drawMove } from './overlay.js';
+import { glyphSVG } from './glyph.js';
 
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -17,6 +18,7 @@ const els = {
   next: document.getElementById('next'),
   reset: document.getElementById('reset'),
   mirror: document.getElementById('mirror'),
+  glyph: document.getElementById('glyph'),
 };
 
 const state = {
@@ -40,7 +42,6 @@ function render() {
 
     if (state.phase === 'scanning') {
       drawGuide(ctx, region, true);
-      drawScanIndicator(ctx, region, SCAN_STEPS[state.scanIndex]?.motion);
     } else if (state.phase === 'guide') {
       drawGuide(ctx, region, false);
       if (state.moveIndex < state.solution.length) {
@@ -123,7 +124,15 @@ function promptCurrentScan() {
   const step = SCAN_STEPS[state.scanIndex];
   setStatus(`Scan ${state.scanIndex + 1}/6 — <b>${step.title}</b>`);
   setHint(step.hint);
+  setGlyph(step.motion);
   showButtons({ primary: `Capture ${step.title}`, reset: true });
+}
+
+// Show the reorientation glyph for a step (hidden for the first face / no motion).
+function setGlyph(motion) {
+  const svg = glyphSVG(motion);
+  els.glyph.innerHTML = svg;
+  els.glyph.hidden = !svg;
 }
 
 function captureFace() {
@@ -145,6 +154,7 @@ async function solveScanned() {
   state.phase = 'solving';
   setStatus('Solving…');
   setHint('Computing the shortest solution.');
+  setGlyph(null);
   showButtons({ primary: null, reset: true });
 
   const { facelets, counts } = toFaceletString(state.faces);

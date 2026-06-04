@@ -81,27 +81,6 @@ function arcArrow(ctx, cx, cy, radius, ccw, w, color, dashed) {
   ctx.restore();
 }
 
-// A bowed arrow from (x1,y1) to (x2,y2); `bow` offsets the control point
-// perpendicular to the line (0 = straight).
-function sweepArrow(ctx, x1, y1, x2, y2, bow, w, color) {
-  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-  const dx = x2 - x1, dy = y2 - y1;
-  const len = Math.hypot(dx, dy) || 1;
-  const px = -dy / len, py = dx / len; // unit perpendicular
-  const cxp = mx + px * bow, cyp = my + py * bow;
-  ctx.save();
-  ctx.strokeStyle = color;
-  ctx.fillStyle = color;
-  ctx.lineWidth = w;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(x1, y1);
-  ctx.quadraticCurveTo(cxp, cyp, x2, y2);
-  ctx.stroke();
-  arrowhead(ctx, x2, y2, Math.atan2(y2 - cyp, x2 - cxp), w * 2.4);
-  ctx.restore();
-}
-
 // --- public API ------------------------------------------------------------
 
 // The alignment grid shown while scanning.
@@ -175,39 +154,5 @@ export function drawMove(ctx, region, token) {
 
   // The move label is rendered in the (un-mirrored) HTML status bar rather than
   // on the canvas, so it stays readable when the preview is mirrored.
-  ctx.restore();
-}
-
-// Draw the reorientation indicator for a scan step. `motion` is one of:
-//   'front'      - no rotation (just frame a face)
-//   'spin'       - spin about the vertical axis, bringing the right face front
-//   'tiltTop'    - tilt the top toward the camera (front face rolls down)
-//   'tiltBottom' - tilt the bottom toward the camera (front face rolls up)
-// Drawn in true canvas coordinates, so the CSS mirror flips it together with the
-// cube — "make the face follow the arrow" stays correct in either mirror state.
-export function drawScanIndicator(ctx, region, motion) {
-  if (!motion || motion === 'front') return;
-  const { x, y, side } = region;
-  const cx = x + side / 2, cy = y + side / 2;
-  const color = '#ffcc00';
-  const w = Math.max(10, side * 0.06);
-
-  ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,0.6)';
-  ctx.shadowBlur = 8;
-
-  if (motion === 'spin') {
-    // Front face slides toward image-left; bowed arrow across the top band.
-    const ay = y + side * 0.16;
-    const half = side * 0.3;
-    sweepArrow(ctx, cx + half, ay, cx - half, ay, side * 0.13, w, color);
-  } else if (motion === 'tiltTop') {
-    // Front face rolls downward; arrow in the upper area pointing down.
-    sweepArrow(ctx, cx, y + side * 0.14, cx, y + side * 0.5, 0, w, color);
-  } else if (motion === 'tiltBottom') {
-    // Front face rolls upward; arrow in the lower area pointing up.
-    sweepArrow(ctx, cx, y + side * 0.86, cx, y + side * 0.5, 0, w, color);
-  }
-
   ctx.restore();
 }
