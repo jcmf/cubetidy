@@ -39,6 +39,16 @@ the canvas each frame, so all sampling and overlays share one coordinate space.
   for the four sides (keeping the top fixed), then tilt top/bottom toward the
   camera for U/D. If you change an instruction, you change the mapping; re-derive
   carefully or the solve will be wrong while everything still "looks" fine.
+  `test/scan-geometry.test.mjs` guards this contract: it rotates a scrambled cube
+  with cubejs (independent ground truth) per `SCAN_STEPS` and checks the captures
+  reconstruct the true state. Each step also has a `motion` ('spin'/'tiltTop'/
+  'tiltBottom') driving `drawScanIndicator` — keep `motion`, the hint text, and
+  the rotation in `ROTATION` (the test) in sync.
+
+- **Scan indicators are drawn in true canvas coords** (like the solve arrows), so
+  the CSS mirror flips them with the cube and "make the face follow the arrow"
+  holds in either mirror state. That's why the hints avoid left/right words
+  (they'd flip under the mirror) and name the target face instead.
 
 - **Arrow directions** in `overlay.js` (`ARROWS`) are derived for the fixed frame
   "front center toward camera, top center up": `U`→top row LEFT, `D`→bottom row

@@ -2,7 +2,7 @@ import { startCamera } from './camera.js';
 import { computeRegion, sampleGrid } from './detection.js';
 import { SCAN_STEPS, toFaceletString, validate } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
-import { drawGuide, drawMove } from './overlay.js';
+import { drawGuide, drawMove, drawScanIndicator } from './overlay.js';
 
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -40,6 +40,7 @@ function render() {
 
     if (state.phase === 'scanning') {
       drawGuide(ctx, region, true);
+      drawScanIndicator(ctx, region, SCAN_STEPS[state.scanIndex]?.motion);
     } else if (state.phase === 'guide') {
       drawGuide(ctx, region, false);
       if (state.moveIndex < state.solution.length) {

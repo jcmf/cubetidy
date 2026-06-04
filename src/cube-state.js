@@ -9,18 +9,18 @@ import { buildReferences, classify } from './colors.js';
 // Order in which faces are captured, and the holding instruction for each.
 // Letters are Kociemba face letters (U/R/F/D/L/B).
 export const SCAN_STEPS = [
-  { face: 'F', title: 'FRONT',
-    hint: 'Point <b>any</b> face at the camera. This is your reference <b>front</b>.' },
-  { face: 'R', title: 'RIGHT',
-    hint: 'Turn the cube <b>left 90°</b> so the right side now faces the camera. Keep the same face on top.' },
-  { face: 'B', title: 'BACK',
-    hint: 'Turn <b>left</b> again — the <b>back</b> face now faces the camera.' },
-  { face: 'L', title: 'LEFT',
-    hint: 'Turn <b>left</b> again — the <b>left</b> side now faces the camera.' },
-  { face: 'U', title: 'UP',
-    hint: 'Return to the front, then tilt the <b>top</b> of the cube toward the camera.' },
-  { face: 'D', title: 'DOWN',
-    hint: 'Return to the front, then tilt the <b>bottom</b> of the cube toward the camera.' },
+  { face: 'F', title: 'FRONT', motion: 'front',
+    hint: 'Point <b>any</b> face at the camera and fill the grid. This is your reference <b>front</b>.' },
+  { face: 'R', title: 'RIGHT', motion: 'spin',
+    hint: 'Spin the cube to bring its <b>right</b> side to the front — follow the arrow. Keep the same face on top.' },
+  { face: 'B', title: 'BACK', motion: 'spin',
+    hint: 'Spin the same way again to bring the <b>back</b> face to the front.' },
+  { face: 'L', title: 'LEFT', motion: 'spin',
+    hint: 'Spin once more to bring the <b>left</b> side to the front.' },
+  { face: 'U', title: 'UP', motion: 'tiltTop',
+    hint: 'Return to the front, then tilt the <b>top</b> toward the camera — follow the arrow.' },
+  { face: 'D', title: 'DOWN', motion: 'tiltBottom',
+    hint: 'Return to the front, then tilt the <b>bottom</b> toward the camera — follow the arrow.' },
 ];
 
 // Kociemba facelet string order.
