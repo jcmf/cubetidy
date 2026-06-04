@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node test/pipeline.test.mjs"
+    "test": "node test/pipeline.test.mjs && node test/scan-geometry.test.mjs"
   },
   "license": "MIT",
   "dependencies": {
