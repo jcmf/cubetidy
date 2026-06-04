@@ -57,6 +57,30 @@ html, body {
   width: auto;
   height: auto;
 }
+/* Display-only mirror. CSS transforms don't touch the canvas backing store,
+   so getImageData sampling (and therefore the solve) stays in true orientation. */
+#canvas.mirrored { transform: scaleX(-1); }
+
+.corner-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  appearance: none;
+  border: 1px solid #2c3444;
+  background: rgba(26, 31, 43, 0.8);
+  color: var(--muted);
+  padding: 7px 11px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+}
+.corner-btn[aria-pressed="true"] {
+  color: #fff;
+  border-color: var(--accent);
+  background: rgba(47, 107, 240, 0.7);
+}
 
 #captured {
   display: flex;

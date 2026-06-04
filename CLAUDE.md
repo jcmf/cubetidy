@@ -52,6 +52,14 @@ the canvas each frame, so all sampling and overlays share one coordinate space.
   CIE-Lab. This guarantees centers map to themselves and survives lighting shifts.
   Red↔orange is the residual weak spot under warm light.
 
+- **Mirroring is display-only** — a `scaleX(-1)` CSS class (`.mirrored`) on the
+  `<canvas>`. CSS transforms don't touch the canvas backing store, so
+  `getImageData` sampling (and the solve) keep reading the true frame. Don't
+  "fix" this by flipping the video into the canvas buffer — that would mirror the
+  sampled cells and produce a wrong cube state. Arrows stay correct because they
+  are glued to the cube and flip with it; canvas text is avoided for the same
+  reason (it would render reversed), so move labels live in the HTML status bar.
+
 - `cubejs` is CommonJS; `vite.config.js` pre-bundles it (`optimizeDeps.include`).
   Keep that if you touch the Vite config.
 

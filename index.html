@@ -15,7 +15,8 @@
       <main id="stage">
         <!-- Live camera frames are drawn onto the canvas; the video element is hidden. -->
         <video id="video" playsinline muted autoplay></video>
-        <canvas id="canvas"></canvas>
+        <canvas id="canvas" class="mirrored"></canvas>
+        <button id="mirror" class="corner-btn" aria-pressed="true" title="Mirror the preview">⇄ Mirror</button>
       </main>
 
       <aside id="captured" aria-label="Captured faces"></aside>

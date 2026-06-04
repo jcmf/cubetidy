@@ -120,7 +120,7 @@ export function drawClassified(ctx, region, labels) {
 // Draw the AR arrow for a single move on the front-facing grid.
 export function drawMove(ctx, region, token) {
   const { x, y, side, cell } = region;
-  const { spec, double } = parseMove(token);
+  const { spec } = parseMove(token);
   if (!spec) return;
 
   const color = spec.back ? '#ffd60a' : '#4f8cff';
@@ -152,16 +152,7 @@ export function drawMove(ctx, region, token) {
       spec.dir === 'ccw', w, color, spec.back);
   }
 
-  // Big move label + optional ×2 badge, top-center of the region.
-  ctx.fillStyle = '#fff';
-  ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-  ctx.lineWidth = 4;
-  ctx.font = `700 ${Math.floor(side * 0.16)}px ui-monospace, monospace`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  const label = token + (spec.back ? '  (back layer)' : '');
-  ctx.strokeText(label, x + side / 2, y - side * 0.2);
-  ctx.fillText(label, x + side / 2, y - side * 0.2);
-
+  // The move label is rendered in the (un-mirrored) HTML status bar rather than
+  // on the canvas, so it stays readable when the preview is mirrored.
   ctx.restore();
 }

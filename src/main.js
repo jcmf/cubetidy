@@ -16,6 +16,7 @@ const els = {
   prev: document.getElementById('prev'),
   next: document.getElementById('next'),
   reset: document.getElementById('reset'),
+  mirror: document.getElementById('mirror'),
 };
 
 const state = {
@@ -52,15 +53,15 @@ function render() {
 }
 
 function drawSolved(region) {
+  // Green flash only — no canvas text (it would read backwards when mirrored).
+  // The "solved" message lives in the status bar.
   const { x, y, side } = region;
   ctx.save();
-  ctx.fillStyle = 'rgba(52,199,89,0.18)';
+  ctx.fillStyle = 'rgba(52,199,89,0.22)';
   ctx.fillRect(x, y, side, side);
-  ctx.fillStyle = '#34c759';
-  ctx.font = `700 ${Math.floor(side * 0.22)}px ui-monospace, monospace`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('✓ Solved', x + side / 2, y + side / 2);
+  ctx.lineWidth = Math.max(4, side * 0.02);
+  ctx.strokeStyle = '#34c759';
+  ctx.strokeRect(x, y, side, side);
   ctx.restore();
 }
 
@@ -91,14 +92,18 @@ function showButtons({ primary, prev, next, reset }) {
   els.reset.hidden = !reset;
 }
 
-function renderMoveList() {
-  const chips = state.solution.map((m, i) => {
-    const cls = i === state.moveIndex ? 'current' : i < state.moveIndex ? 'done' : '';
+// The move label that used to be drawn on the canvas now lives in the status bar.
+function showCurrentMove() {
+  const i = state.moveIndex, n = state.solution.length;
+  const tok = state.solution[i];
+  const note = tok[0] === 'B' ? ' · back layer' : '';
+  setStatus(`Move ${i + 1}/${n} — <b>${tok}</b>${note}`);
+  const chips = state.solution.map((m, k) => {
+    const cls = k === i ? 'current' : k < i ? 'done' : '';
     return `<span class="move-chip ${cls}">${m}</span>`;
   }).join('');
   setHint(
-    `<b>Move ${state.moveIndex + 1} of ${state.solution.length}</b> — ` +
-    `keep the front center toward the camera, top center up.` +
+    `Keep the front center toward the camera, top center up.` +
     `<div class="move-list">${chips}</div>`
   );
 }
@@ -158,8 +163,7 @@ async function solveScanned() {
     setHint('This cube is already in the solved state.');
     showButtons({ primary: 'Scan another', reset: false });
   } else {
-    setStatus(`Solution found — ${state.solution.length} moves`);
-    renderMoveList();
+    showCurrentMove();
     showButtons({ primary: null, prev: true, next: true, reset: true });
     updateStepButtons();
   }
@@ -183,8 +187,7 @@ function step(delta) {
     setStatus('✓ All moves done');
     setHint('The cube should now be solved. <span class="move-chip done">restart to scan again</span>');
   } else {
-    setStatus(`Solution — ${state.solution.length} moves`);
-    renderMoveList();
+    showCurrentMove();
   }
   updateStepButtons();
 }
@@ -214,6 +217,11 @@ els.primary.addEventListener('click', async () => {
 els.next.addEventListener('click', () => step(1));
 els.prev.addEventListener('click', () => step(-1));
 els.reset.addEventListener('click', () => enterScanning());
+
+els.mirror.addEventListener('click', () => {
+  const on = canvas.classList.toggle('mirrored');
+  els.mirror.setAttribute('aria-pressed', String(on));
+});
 
 showButtons({ primary: 'Start camera' });
 requestAnimationFrame(render);
