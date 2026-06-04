@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>CubeTidy — AR Rubik's Cube Solver</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="statusbar">
+        <span id="status">Tap “Start camera” to begin</span>
+      </header>
+
+      <main id="stage">
+        <!-- Live camera frames are drawn onto the canvas; the video element is hidden. -->
+        <video id="video" playsinline muted autoplay></video>
+        <canvas id="canvas"></canvas>
+      </main>
+
+      <aside id="captured" aria-label="Captured faces"></aside>
+
+      <footer id="controls">
+        <button id="primary" class="btn btn-primary">Start camera</button>
+        <button id="prev" class="btn" hidden>‹ Prev</button>
+        <button id="next" class="btn" hidden>Next ›</button>
+        <button id="reset" class="btn btn-ghost" hidden>Reset</button>
+      </footer>
+
+      <div id="hint"></div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
