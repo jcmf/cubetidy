@@ -150,14 +150,14 @@ function promptCurrentScan() {
   showButtons({ primary: 'Capture', reset: true });
 }
 
-// Show the reorientation glyph for a step (hidden for the first face / no motion).
+// Show the corner-on instruction glyph ('corner'/'flip'); null hides it.
 function setGlyph(motion) {
   const svg = glyphSVG(motion);
   els.glyph.innerHTML = svg;
   els.glyph.hidden = !svg;
 }
 
-function captureFace() {
+function captureCorner() {
   const cap = CORNER_CAPTURES[state.scanIndex];
   const region = computeCornerRegion(canvas.width, canvas.height);
   const faces = sampleCorner(ctx, region, cap);
@@ -241,7 +241,7 @@ els.primary.addEventListener('click', async () => {
       setHint(err.message);
     }
   } else if (state.phase === 'scanning') {
-    captureFace();
+    captureCorner();
   } else if (state.phase === 'error') {
     enterScanning();
   } else if (state.phase === 'guide') {
