@@ -77,18 +77,25 @@ the canvas each frame, so all sampling and overlays share one coordinate space.
   never move under face turns, so these stay valid for the whole solve as long as
   the user keeps that orientation.
 
-- **Color classification is calibration-based**, not fixed thresholds: the six
-  captured centers are the references, every sticker is matched to the nearest in
-  CIE-Lab. This guarantees centers map to themselves and survives lighting shifts.
-  Red↔orange is the residual weak spot under warm light.
+- **Color classification is balanced, center-anchored k-means** (`classifyFaces`
+  in `colors.js`), not fixed thresholds. It clusters all 54 samples in CIE-Lab with
+  k=6, the six captured centers pinned to their own clusters and every cluster
+  forced to exactly nine — both strong cube priors. This beats plain nearest-center
+  at the red↔orange boundary under warm light: clearly-colored stickers claim their
+  nine slots and the ambiguous ones fall to the only label left. It returns
+  `conflicts` (stickers the balance constraint pulled off their nearest centroid) =
+  a residual-ambiguity signal. Because counts are 9-each *by construction*, that
+  signal — not a count mismatch — is what flags a shaky read (see next bullet).
+  `buildReferences`/`classify` (single nearest-center) remain for reference/tests.
 
-- **Bad scans fold in more passes instead of failing.** If a completed pass (both
-  corners) doesn't validate or solve, `main.js` re-scans up to `MAX_PASSES` times
-  and `aggregateFaces` (in `cube-state.js`) averages each facelet's RGB across all
-  passes before re-classifying — the user holds the cube at a slightly different
-  angle each pass so per-sticker glare/lighting averages out. Facelet indices are
-  identical across passes (deterministic capture geometry), so averaging needs no
-  registration. Only the final failure surfaces the validate/solve error.
+- **Shaky scans fold in more passes instead of failing.** If a completed pass (both
+  corners) fails to validate, has `conflicts > 0`, or doesn't solve, `main.js`
+  re-scans up to `MAX_PASSES` times and `aggregateFaces` (`cube-state.js`) averages
+  each facelet's RGB across all passes before re-classifying — the user holds the
+  cube at a slightly different angle each pass so per-sticker glare/lighting
+  averages out. Facelet indices are identical across passes (deterministic capture
+  geometry), so averaging needs no registration. Only a final failure surfaces an
+  error; an unresolved ambiguity after the last pass commits the best guess.
 
 - **Mirroring is display-only** — a `scaleX(-1)` CSS class (`.mirrored`) on the
   `<canvas>`. CSS transforms don't touch the canvas backing store, so
@@ -115,8 +122,9 @@ gaps / next steps:
 - `detection.js` is still the seam for true cube tracking (contour detection +
   6-DoF pose via `solvePnP`, 3D arrows with three.js), which would drop the
   align-to-guide requirement entirely.
-- Classification could move to k-means over all 54 samples to better separate
-  red/orange; oblique corner-on faces stress this more than flat-on did.
+- Classification is balanced k-means over all 54 samples (done). A possible next
+  step is weighting each sticker by sampling confidence (patch variance / glare),
+  since oblique corner-on faces vary in quality more than flat-on did.
 
 The pixel-sampling layer is the only part `npm test` can't cover — **verify camera
 changes in a real browser with a physical cube.**

@@ -199,25 +199,23 @@ async function solveScanned() {
 
   const faces = aggregateFaces(state.passes);
   state.faces = faces; // aggregate drives the solve-orientation swatches
-  const { facelets, counts } = toFaceletString(faces);
+  const { facelets, counts, conflicts } = toFaceletString(faces);
 
-  let problem = null;
   const check = validate(facelets, counts);
-  if (!check.ok) problem = check.error;
+  const havePasses = state.passes.length < MAX_PASSES;
+  if (!check.ok) return havePasses ? anotherPass() : failScan(check.error);
 
-  let solution = null;
-  if (!problem) {
-    try {
-      solution = await solve(facelets);
-    } catch (err) {
-      problem = `Unsolvable state — a color was misread. (${err.message})`;
-    }
-  }
+  // The balanced classifier had to override some stickers' nearest color, so the
+  // read is ambiguous (typically red vs orange). Gather another angle before
+  // committing while we still can.
+  if (conflicts > 0 && havePasses) return anotherPass();
 
-  if (problem) {
-    // Don't discard the scan — fold in another pass from a fresh angle.
-    if (state.passes.length < MAX_PASSES) return anotherPass();
-    return failScan(problem);
+  let solution;
+  try {
+    solution = await solve(facelets);
+  } catch (err) {
+    const msg = `Unsolvable state — a color was misread. (${err.message})`;
+    return havePasses ? anotherPass() : failScan(msg);
   }
 
   state.solution = solution;

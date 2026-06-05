@@ -4,7 +4,7 @@
 // maps DIRECTLY onto that face's facelet positions. See SCAN_STEPS for the exact
 // physical orientation the user is asked to hold for each capture.
 
-import { buildReferences, classify } from './colors.js';
+import { classifyFaces } from './colors.js';
 
 // Order in which faces are captured, and the holding instruction for each.
 // Letters are Kociemba face letters (U/R/F/D/L/B).
@@ -28,18 +28,12 @@ const FACELET_ORDER = ['U', 'R', 'F', 'D', 'L', 'B'];
 
 // Build the 54-char facelet string from captured faces.
 // `faces` maps face letter -> 9 {r,g,b} samples (row-major as captured).
+// `conflicts` is the classifier's residual-ambiguity count (see classifyFaces).
 export function toFaceletString(faces) {
-  const references = buildReferences(faces);
+  const { labels, counts, conflicts } = classifyFaces(faces);
   let out = '';
-  const counts = {};
-  for (const letter of FACELET_ORDER) {
-    for (const sample of faces[letter]) {
-      const { label } = classify(sample, references);
-      out += label;
-      counts[label] = (counts[label] ?? 0) + 1;
-    }
-  }
-  return { facelets: out, counts };
+  for (const letter of FACELET_ORDER) out += labels[letter].join('');
+  return { facelets: out, counts, conflicts };
 }
 
 // Average each facelet's RGB across one or more scan passes. The capture geometry
