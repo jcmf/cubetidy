@@ -58,116 +58,109 @@ export function sampleGrid(ctx, region) {
 // together, their relative orientation is fixed by geometry rather than by the
 // user following per-face rotation instructions.
 //
-// A perfect corner-on cube projects to a regular hexagon silhouette. Its six
-// outer vertices V0..V5 (V0 at top, going clockwise) plus the centre C are:
-//
-//        V0
-//      /    \            V0 = top        V3 = bottom
-//   V5        V1         V1 = upper-right V4 = lower-left
-//    |   C    |          V2 = lower-right V5 = upper-left
-//   V4        V2
-//      \    /            The three visible faces are the rhombi
-//        V3              (V5 V0 V1 C), (V5 C V3 V4), (C V1 V2 V3).
-//
-// Each rhombus is a parallelogram, so each face is sampled with a single affine
-// map: a face is described by an origin corner O (where facelet 0 sits) and two
-// edge vectors `col` (facelet col 0->2) and `row` (facelet row 0->2), each
-// spanning the whole 3-cell edge. The corner->facelet labelling is derived so
-// that the 9 samples come out in Kociemba facelet row-major order, letting the
-// rest of the pipeline consume them unchanged. The derivation is guarded by
-// test/corner-geometry.test.mjs.
+// Geometry is a real perspective projection of a 3D cube, not a flat hexagon: a
+// unit cube is rotated so a corner aims at the lens, then projected through a
+// pinhole camera. The `persp` parameter (0..1) is the camera distance in cube-
+// widths — 0 is (near-)orthographic, where the silhouette is a regular hexagon
+// and cells are evenly spaced; higher values foreshorten (near corner magnified,
+// far cells smaller), matching a cube held close to the lens. This is the seam a
+// user-facing slider drives. Projecting the real sticker centres makes the 9
+// samples per face come out in Kociemba facelet row-major order (per FACE_AXES),
+// so the rest of the pipeline is unchanged. Guarded by corner-geometry.test.mjs.
 
-const CORNER_FRACTION = 0.78; // hexagon width as a fraction of the smaller dim
-const COS30 = Math.sqrt(3) / 2;
+const CORNER_FRACTION = 0.78; // silhouette width as a fraction of the smaller dim
+const DZ_FAR = 16, DZ_NEAR = 3.2; // camera distance (cube half-size = 1) at persp 0 / 1
 
-// The two corner captures and which face sits in each rhombus.
-//   capture 1: URF corner toward camera — U on top, F lower-left, R lower-right
-//   capture 2: opposite (DLB) corner    — D on top, L lower-left, B lower-right
-// `o`/`c`/`r` name the hexagon points (centre 'C', outer 0..5) for the face's
-// origin, col-edge end, and row-edge end. See the ASCII map above.
-export const CORNER_CAPTURES = [
-  {
-    id: 'URF', title: 'first corner', faces: [
-      { letter: 'U', o: 0, c: 1, r: 5 },
-      { letter: 'F', o: 5, c: 'C', r: 4 },
-      { letter: 'R', o: 'C', c: 1, r: 3 },
-    ],
-  },
-  {
-    id: 'DLB', title: 'opposite corner', faces: [
-      { letter: 'D', o: 5, c: 0, r: 'C' },
-      { letter: 'L', o: 3, c: 4, r: 'C' },
-      { letter: 'B', o: 2, c: 3, r: 1 },
-    ],
-  },
+// Per-face in-plane axes matching Kociemba facelet orientation: outward normal
+// `n`, plus the directions of increasing facelet column and row. A sticker
+// centre is n + col*(2u-1) + row*(2v-1) for face-local (u,v) in [0,1].
+const FACE_AXES = {
+  U: { n: [0, 1, 0], col: [1, 0, 0], row: [0, 0, 1] },
+  D: { n: [0, -1, 0], col: [1, 0, 0], row: [0, 0, -1] },
+  F: { n: [0, 0, 1], col: [1, 0, 0], row: [0, -1, 0] },
+  B: { n: [0, 0, -1], col: [-1, 0, 0], row: [0, -1, 0] },
+  R: { n: [1, 0, 0], col: [0, 0, -1], row: [0, -1, 0] },
+  L: { n: [-1, 0, 0], col: [0, 0, 1], row: [0, -1, 0] },
+};
+
+// Cube->camera rotations (camera frame: x right, y down, z toward viewer).
+// Capture 0 aims the URF corner at the lens (U up, F lower-left, R lower-right).
+// Capture 1 = capture 0 then a 180° flip about the horizontal screen axis
+// (diag(1,-1,-1)), aiming the opposite DLB corner — ONE unambiguous motion (a
+// 180° flip has no directional ambiguity and keeps left-right fixed).
+const POSES = [
+  [[0.70711, 0, -0.70711], [0.40825, -0.81650, 0.40825], [0.57735, 0.57735, 0.57735]],
+  [[0.70711, 0, -0.70711], [-0.40825, 0.81650, -0.40825], [-0.57735, -0.57735, -0.57735]],
 ];
 
-// Hexagon centre + the seven named points for a given canvas size.
-export function computeCornerRegion(width, height) {
-  const r = Math.floor(Math.min(width, height) * CORNER_FRACTION) / 2;
-  const cx = width / 2, cy = height / 2;
-  const outer = [
-    { x: cx, y: cy - r },                 // 0 top
-    { x: cx + COS30 * r, y: cy - r / 2 }, // 1 upper-right
-    { x: cx + COS30 * r, y: cy + r / 2 }, // 2 lower-right
-    { x: cx, y: cy + r },                 // 3 bottom
-    { x: cx - COS30 * r, y: cy + r / 2 }, // 4 lower-left
-    { x: cx - COS30 * r, y: cy - r / 2 }, // 5 upper-left
+export const CORNER_CAPTURES = [
+  { id: 'URF', title: 'first corner', faces: ['U', 'F', 'R'] },
+  { id: 'DLB', title: 'opposite corner', faces: ['D', 'L', 'B'] },
+];
+
+// The 6 "equatorial" cube corners (all but the near + far corner of a corner-on
+// view); their projection is the silhouette hexagon.
+const EQUATORIAL = [[1, 1, -1], [-1, 1, 1], [1, -1, 1], [-1, 1, -1], [1, -1, -1], [-1, -1, 1]];
+
+const clamp01 = (t) => Math.max(0, Math.min(1, t));
+
+function matVec(m, p) {
+  return [
+    m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2],
+    m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2],
+    m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2],
   ];
-  return { center: { x: cx, y: cy }, r, outer };
 }
 
-// The two captures are opposite corners; the user gets from the first to the
-// second with ONE unambiguous motion: a 180° flip about the horizontal (left-
-// right) screen axis (tip the top edge over until the opposite corner faces the
-// camera). Derivation: the rotation taking the URF-corner pose to the DLB-corner
-// pose works out to diag(1,-1,-1) in screen space. A 180° flip about horizontal
-// has no directional ambiguity and keeps left-right fixed, so it fully pins the
-// second pose (the user can only get it wrong by also twisting about the view
-// axis).
-
-// Resolve a point name ('C' or 0..5) to {x,y} for a region.
-function point(region, name) {
-  return name === 'C' ? region.center : region.outer[name];
+// Face-local (u,v) in [0,1]^2 -> a point on that cube face (side 2).
+function facePoint(letter, u, v) {
+  const { n, col, row } = FACE_AXES[letter];
+  const su = 2 * u - 1, sv = 2 * v - 1;
+  return [n[0] + col[0] * su + row[0] * sv, n[1] + col[1] * su + row[1] * sv, n[2] + col[2] * su + row[2] * sv];
 }
 
-// The affine frame for one face's rhombus: origin corner (facelet 0) and the two
-// edge vectors spanning facelet col 0->2 and row 0->2.
-export function faceFrame(region, face) {
-  const o = point(region, face.o);
-  const cEnd = point(region, face.c);
-  const rEnd = point(region, face.r);
-  return {
-    o,
-    col: { x: cEnd.x - o.x, y: cEnd.y - o.y },
-    row: { x: rEnd.x - o.x, y: rEnd.y - o.y },
-  };
-}
+// Build the projected scene (screen-space geometry) for one capture. Returns the
+// centre, and per visible face its 9 cell-centre sample points (facelet row-
+// major), the 4 rhombus corners, and the internal 3x3 grid lines for drawing.
+export function computeCornerRegion(width, height, persp = 0, captureIndex = 0) {
+  const Dz = DZ_FAR + (DZ_NEAR - DZ_FAR) * clamp01(persp);
+  const pose = POSES[captureIndex];
+  const cap = CORNER_CAPTURES[captureIndex];
+  const raw = (p3) => { const c = matVec(pose, p3); const d = Dz - c[2]; return { x: c[0] / d, y: c[1] / d }; };
 
-// Map facelet (row i, col j) fractions to a screen point under a face frame.
-function framePoint({ o, col, row }, fj, fi) {
-  return { x: o.x + fj * col.x + fi * row.x, y: o.y + fj * col.y + fi * row.y };
-}
+  // Fit the silhouette to the target radius, centred on the canvas.
+  const outline = EQUATORIAL.map(raw);
+  const radius = Math.max(...outline.map((p) => Math.hypot(p.x, p.y)));
+  const scale = (Math.min(width, height) * CORNER_FRACTION / 2) / radius;
+  const cx = width / 2, cy = height / 2;
+  const map = (p3) => { const p = raw(p3); return { x: cx + p.x * scale, y: cy + p.y * scale }; };
+  const at = (letter, u, v) => map(facePoint(letter, u, v));
 
-// The 9 facelet sample points (row-major) for one face of a capture.
-export function faceSamplePoints(region, face) {
-  const frame = faceFrame(region, face);
-  const pts = [];
-  for (let i = 0; i < 3; i++) {
-    for (let j = 0; j < 3; j++) {
-      pts.push(framePoint(frame, (j + 0.5) / 3, (i + 0.5) / 3));
+  const faces = cap.faces.map((letter) => {
+    const cells = [];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) cells.push(at(letter, (j + 0.5) / 3, (i + 0.5) / 3));
+    const quad = [at(letter, 0, 0), at(letter, 1, 0), at(letter, 1, 1), at(letter, 0, 1)];
+    const grid = [];
+    for (const k of [1, 2]) {
+      grid.push([at(letter, k / 3, 0), at(letter, k / 3, 1)]);
+      grid.push([at(letter, 0, k / 3), at(letter, 1, k / 3)]);
     }
-  }
-  return pts;
+    return { letter, cells, quad, grid };
+  });
+
+  return { center: { x: cx, y: cy }, scale, faces };
 }
 
-// Sample one corner capture, returning { [letter]: [9 samples] } in facelet order.
-export function sampleCorner(ctx, region, capture) {
+// Sample a capture's scene, returning { [letter]: [9 samples] } in facelet order.
+// The patch size is derived per face from the on-screen cell spacing, so it
+// tracks the foreshortening (cells shrink toward the far edges under perspective).
+export function sampleCorner(ctx, scene) {
   const img = ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height);
-  const patch = Math.max(4, Math.floor(region.r * 0.12));
   const out = {};
-  for (const face of capture.faces) {
-    out[face.letter] = faceSamplePoints(region, face).map((p) =>
+  for (const face of scene.faces) {
+    const cell = Math.hypot(face.cells[1].x - face.cells[0].x, face.cells[1].y - face.cells[0].y);
+    const patch = Math.max(4, Math.floor(cell * 0.36));
+    out[face.letter] = face.cells.map((p) =>
       samplePatch(img.data, ctx.canvas.width, Math.round(p.x), Math.round(p.y), patch));
   }
   return out;

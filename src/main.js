@@ -31,11 +31,14 @@ const els = {
   reset: document.getElementById('reset'),
   mirror: document.getElementById('mirror'),
   glyph: document.getElementById('glyph'),
+  perspective: document.getElementById('perspective'),
+  perspectiveControl: document.getElementById('perspective-control'),
 };
 
 const state = {
   phase: 'idle', // idle | scanning | solving | guide | error
   scanIndex: 0,
+  persp: parseFloat(els.perspective.value), // corner-guide perspective (0..1)
   faces: {},
   solution: [],
   moveIndex: 0,
@@ -52,7 +55,8 @@ function render() {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     if (state.phase === 'scanning') {
-      drawCornerGuide(ctx, computeCornerRegion(canvas.width, canvas.height), true);
+      const scene = computeCornerRegion(canvas.width, canvas.height, state.persp, state.scanIndex);
+      drawCornerGuide(ctx, scene, true);
     } else if (state.phase === 'guide') {
       const region = computeRegion(canvas.width, canvas.height);
       drawGuide(ctx, region, false);
@@ -147,6 +151,7 @@ function promptCurrentScan() {
   setStatus(`Scan ${state.scanIndex + 1}/${CORNER_CAPTURES.length} — <b>${cap.title}</b>`);
   setHint(ui.hint);
   setGlyph(ui.glyph);
+  els.perspectiveControl.hidden = false;
   showButtons({ primary: 'Capture', reset: true });
 }
 
@@ -158,12 +163,11 @@ function setGlyph(motion) {
 }
 
 function captureCorner() {
-  const cap = CORNER_CAPTURES[state.scanIndex];
-  const region = computeCornerRegion(canvas.width, canvas.height);
-  const faces = sampleCorner(ctx, region, cap);
-  for (const face of cap.faces) {
-    state.faces[face.letter] = faces[face.letter];
-    addThumb(faces[face.letter]);
+  const scene = computeCornerRegion(canvas.width, canvas.height, state.persp, state.scanIndex);
+  const faces = sampleCorner(ctx, scene);
+  for (const f of scene.faces) {
+    state.faces[f.letter] = faces[f.letter];
+    addThumb(faces[f.letter]);
   }
 
   state.scanIndex++;
@@ -179,6 +183,7 @@ async function solveScanned() {
   setStatus('Solving…');
   setHint('Computing the shortest solution.');
   setGlyph(null);
+  els.perspectiveControl.hidden = true;
   showButtons({ primary: null, reset: true });
 
   const { facelets, counts } = toFaceletString(state.faces);
@@ -206,6 +211,7 @@ async function solveScanned() {
 
 function failScan(message) {
   state.phase = 'error';
+  els.perspectiveControl.hidden = true;
   setStatus('⚠️ Scan problem');
   setHint(`${message}<br>Tap to scan again.`);
   showButtons({ primary: 'Scan again' });
@@ -256,6 +262,10 @@ els.reset.addEventListener('click', () => enterScanning());
 els.mirror.addEventListener('click', () => {
   const on = canvas.classList.toggle('mirrored');
   els.mirror.setAttribute('aria-pressed', String(on));
+});
+
+els.perspective.addEventListener('input', () => {
+  state.persp = parseFloat(els.perspective.value);
 });
 
 showButtons({ primary: 'Start camera' });

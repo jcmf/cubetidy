@@ -18,6 +18,11 @@
         <canvas id="canvas" class="mirrored"></canvas>
         <button id="mirror" class="corner-btn" aria-pressed="true" title="Mirror the preview">⇄ Mirror</button>
         <div id="glyph" hidden aria-hidden="true"></div>
+        <label id="perspective-control" hidden>
+          <span>Perspective</span>
+          <input id="perspective" type="range" min="0" max="0.85" step="0.01" value="0.35"
+                 aria-label="Cube perspective" />
+        </label>
       </main>
 
       <aside id="captured" aria-label="Captured faces"></aside>

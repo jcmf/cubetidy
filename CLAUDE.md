@@ -42,10 +42,14 @@ the canvas each frame, so all sampling and overlays share one coordinate space.
 
 - **Scan is corner-on: two captures** (`CORNER_CAPTURES` in `detection.js`). The
   user points a cube *corner* at the camera so three faces show at once as
-  foreshortened rhombi (a regular-hexagon silhouette); two opposite corners cover
-  all six faces. Each rhombus is a parallelogram, sampled by one affine map whose
-  corner→facelet labelling emits the 9 stickers *already in facelet row-major
-  order*, so everything downstream is unchanged. The second capture is reached by
+  foreshortened rhombi; two opposite corners cover all six faces. Geometry is a
+  real **perspective projection** of a 3D cube (`computeCornerRegion` rotates a
+  unit cube corner-on and projects through a pinhole camera), not a flat hexagon —
+  the `persp` arg (0..1, a camera-distance slider in the UI) tapers the template
+  and the sampling grid to match how close the cube is held; `persp=0` is the
+  near-orthographic regular hexagon. Projecting the real sticker centres (per
+  `FACE_AXES`) emits each face's 9 samples *already in facelet row-major order*, so
+  everything downstream is unchanged. The second capture is reached by
   **one** unambiguous motion — a 180° flip about the horizontal screen axis
   (derived: the URF→DLB pose rotation is `diag(1,−1,−1)`); a 180° flip has no
   directional ambiguity, which is the whole reason for this design over the old six

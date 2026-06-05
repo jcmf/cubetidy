@@ -126,12 +126,24 @@ async function sceneGlyphs() {
 }
 
 async function sceneCornerGuide() {
-  const W = 720, H = 720;
+  // Two panels: orthographic (slider at 0) and a strong perspective, so the
+  // golden documents how the slider tapers the template.
+  const persps = [0, 0.6];
+  const P = 520, gap = 24, margin = 24, labelH = 44;
+  const W = margin * 2 + P * persps.length + gap * (persps.length - 1);
+  const H = margin * 2 + P + labelH;
   const canvas = new Canvas(W, H);
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#0e1116';
   ctx.fillRect(0, 0, W, H);
-  drawCornerGuide(ctx, computeCornerRegion(W, H), true);
+  persps.forEach((persp, i) => {
+    const x = margin + i * (P + gap), y = margin;
+    ctx.save();
+    ctx.translate(x, y);
+    drawCornerGuide(ctx, computeCornerRegion(P, P, persp, 0), true);
+    ctx.restore();
+    label(ctx, `persp ${persp}`, x + P / 2, y + P + 30);
+  });
   return canvas;
 }
 
