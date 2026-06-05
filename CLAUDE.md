@@ -8,6 +8,13 @@ each move. Vanilla JS + Canvas, bundled by Vite. No framework.
 - `npm run dev` — dev server on `localhost` (camera needs https or localhost).
 - `npm run build` — production build; also the fastest way to catch import/syntax errors.
 - `npm test` — end-to-end pipeline test (`test/pipeline.test.mjs`), no browser needed.
+- `npm run preview:check` — render the overlay/glyph layer with skia-canvas (no
+  browser) and pixel-diff against committed goldens in `tools/preview/golden/`.
+  Run after touching `overlay.js`/`glyph.js`; a mismatch writes a red-highlighted
+  `tools/preview/out/<scene>-diff.png` and exits non-zero. If the change is
+  intentional, `npm run preview:update` and review the golden image diff. NOT part
+  of `npm test` (golden diffs are platform-sensitive). Covers overlay *geometry*
+  only — not the composited UI (no camera, CSS mirror, or HTML chrome).
 
 ## Committing
 
