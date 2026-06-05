@@ -97,7 +97,7 @@ async function sceneMoveArrows() {
 }
 
 async function sceneGlyphs() {
-  const motions = ['spin', 'tiltTop', 'tiltBottom'];
+  const motions = ['corner', 'flip'];
   const box = 200, gap = 24, margin = 24, labelH = 44;
   const W = margin * 2 + motions.length * box + (motions.length - 1) * gap;
   const H = margin * 2 + box + labelH;

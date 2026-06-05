@@ -23,23 +23,23 @@ function amber(d) {
           <path d="${d}" fill="none" stroke="#ffce1f" stroke-width="4.5" stroke-linecap="round" marker-end="url(#gh)"/>`;
 }
 
-// Spin about the vertical axis: a turntable ellipse below the cube, far half
-// dashed, near half a solid arrow.
-const SPIN = `
-  <path d="M20,96 A40,9 0 0 1 100,96" fill="none" stroke="#c9d2e0" stroke-width="3"
+// Flip the whole cube 180° about the horizontal (left-right) axis, bringing the
+// opposite corner to the camera: a vertical loop around the cube, far (right)
+// half dashed, near (left) half a solid arrow whose head points down the front.
+const FLIP = `
+  <path d="M60,16 A30,42 0 0 1 60,100" fill="none" stroke="#c9d2e0" stroke-width="3"
         stroke-dasharray="5 5" opacity="0.65"/>
-  ${amber('M100,96 A40,9 0 0 1 20,96')}`;
+  ${amber('M60,16 A30,42 0 0 0 60,100')}`;
 
-// Tilt about a horizontal axis: a curved arrow down (top toward camera) or up
-// (bottom toward camera) over the front of the cube.
+// 'corner' shows the bare corner-on cube (hold any corner to the camera);
+// 'flip' adds the 180° flip arrow for the opposite corner.
 const ARROWS = {
-  spin: SPIN,
-  tiltTop: amber('M60,40 Q86,63 60,86'),
-  tiltBottom: amber('M60,86 Q86,63 60,40'),
+  corner: '',
+  flip: FLIP,
 };
 
 export function glyphSVG(motion) {
-  if (!ARROWS[motion]) return '';
+  if (ARROWS[motion] === undefined) return '';
   return `<svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <marker id="gh" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14"

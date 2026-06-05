@@ -1,9 +1,21 @@
 import { startCamera } from './camera.js';
-import { computeRegion, sampleGrid } from './detection.js';
-import { SCAN_STEPS, toFaceletString, validate } from './cube-state.js';
+import { computeRegion, computeCornerRegion, sampleCorner, CORNER_CAPTURES } from './detection.js';
+import { toFaceletString, validate } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
-import { drawGuide, drawMove } from './overlay.js';
+import { drawGuide, drawCornerGuide, drawMove } from './overlay.js';
 import { glyphSVG } from './glyph.js';
+
+// Per-capture UI copy for the corner-on scan. Geometry lives in CORNER_CAPTURES;
+// hints name the held corner relative to the previous one (never left/right of a
+// face, which would flip under the preview mirror).
+const CAPTURE_UI = [
+  { glyph: 'corner',
+    hint: 'Point a <b>corner</b> of the cube straight at the camera and line it up ' +
+      'with the outline — its three faces fill the three diamonds.' },
+  { glyph: 'flip',
+    hint: 'Flip the cube 180° about the <b>left–right</b> axis to bring the opposite ' +
+      'corner forward — follow the arrow. Keep the same side on your left.' },
+];
 
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -38,11 +50,11 @@ function render() {
       canvas.height = video.videoHeight;
     }
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const region = computeRegion(canvas.width, canvas.height);
 
     if (state.phase === 'scanning') {
-      drawGuide(ctx, region, true);
+      drawCornerGuide(ctx, computeCornerRegion(canvas.width, canvas.height), true);
     } else if (state.phase === 'guide') {
+      const region = computeRegion(canvas.width, canvas.height);
       drawGuide(ctx, region, false);
       if (state.moveIndex < state.solution.length) {
         drawMove(ctx, region, state.solution[state.moveIndex]);
@@ -121,11 +133,12 @@ function enterScanning() {
 }
 
 function promptCurrentScan() {
-  const step = SCAN_STEPS[state.scanIndex];
-  setStatus(`Scan ${state.scanIndex + 1}/6 — <b>${step.title}</b>`);
-  setHint(step.hint);
-  setGlyph(step.motion);
-  showButtons({ primary: `Capture ${step.title}`, reset: true });
+  const cap = CORNER_CAPTURES[state.scanIndex];
+  const ui = CAPTURE_UI[state.scanIndex];
+  setStatus(`Scan ${state.scanIndex + 1}/${CORNER_CAPTURES.length} — <b>${cap.title}</b>`);
+  setHint(ui.hint);
+  setGlyph(ui.glyph);
+  showButtons({ primary: 'Capture', reset: true });
 }
 
 // Show the reorientation glyph for a step (hidden for the first face / no motion).
@@ -136,14 +149,16 @@ function setGlyph(motion) {
 }
 
 function captureFace() {
-  const region = computeRegion(canvas.width, canvas.height);
-  const samples = sampleGrid(ctx, region);
-  const step = SCAN_STEPS[state.scanIndex];
-  state.faces[step.face] = samples;
-  addThumb(samples);
+  const cap = CORNER_CAPTURES[state.scanIndex];
+  const region = computeCornerRegion(canvas.width, canvas.height);
+  const faces = sampleCorner(ctx, region, cap);
+  for (const face of cap.faces) {
+    state.faces[face.letter] = faces[face.letter];
+    addThumb(faces[face.letter]);
+  }
 
   state.scanIndex++;
-  if (state.scanIndex < SCAN_STEPS.length) {
+  if (state.scanIndex < CORNER_CAPTURES.length) {
     promptCurrentScan();
   } else {
     solveScanned();
