@@ -5,7 +5,7 @@
 // Run: npm test
 
 import Cube from 'cubejs';
-import { toFaceletString, validate } from '../src/cube-state.js';
+import { toFaceletString, validate, aggregateFaces } from '../src/cube-state.js';
 import { solve } from '../src/solver.js';
 
 // Distinct synthetic RGB per face letter so nearest-reference classify()
@@ -50,6 +50,30 @@ for (let t = 0; t < 8; t++) {
   const c = Cube.fromString(original);
   for (const m of moves) c.move(m);
   check(`#${t} solution (${moves.length} moves) solves the cube`, c.isSolved());
+}
+
+// Multi-pass aggregation: averaging passes with opposite per-channel noise must
+// cancel back to the true colors and round-trip — the basis for re-scanning from
+// new angles to ride out lighting (point 2).
+{
+  const scramble = new Cube();
+  scramble.randomize();
+  const truth = scramble.asString();
+  const base = facesFromString(truth);
+  const jitter = (faces, d) => {
+    const out = {};
+    for (const L of FACE_ORDER) {
+      out[L] = faces[L].map((s) => ({ r: s.r + d, g: s.g - d, b: s.b + d }));
+    }
+    return out;
+  };
+  // Two noisy passes that bracket the truth, plus the clean truth as a third.
+  const agg = aggregateFaces([jitter(base, 12), jitter(base, -12), base]);
+  const { facelets, counts } = toFaceletString(agg);
+  check('aggregated passes cancel noise and round-trip', facelets === truth);
+  check('aggregated passes validate ok', validate(facelets, counts).ok);
+  check('single-pass aggregate is identity',
+    JSON.stringify(aggregateFaces([base])) === JSON.stringify(base));
 }
 
 // A misread that yields 10 of one color must be rejected before solving.

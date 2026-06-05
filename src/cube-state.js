@@ -42,6 +42,26 @@ export function toFaceletString(faces) {
   return { facelets: out, counts };
 }
 
+// Average each facelet's RGB across one or more scan passes. The capture geometry
+// is deterministic, so facelet i of face F means the same sticker every pass —
+// no registration needed. Folding in extra passes from different angles rides out
+// per-sticker lighting/glare (the red-vs-orange boundary) before classification.
+export function aggregateFaces(passes) {
+  const out = {};
+  for (const letter of FACELET_ORDER) {
+    out[letter] = [];
+    for (let i = 0; i < 9; i++) {
+      let r = 0, g = 0, b = 0, n = 0;
+      for (const p of passes) {
+        const s = p[letter]?.[i];
+        if (s) { r += s.r; g += s.g; b += s.b; n++; }
+      }
+      out[letter].push({ r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) });
+    }
+  }
+  return out;
+}
+
 // Sanity-check before handing to the solver. Returns { ok, error }.
 export function validate(facelets, counts) {
   for (const letter of FACELET_ORDER) {

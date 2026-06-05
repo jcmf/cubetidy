@@ -1,6 +1,6 @@
 import { startCamera } from './camera.js';
 import { computeRegion, computeCornerRegion, sampleCorner, CORNER_CAPTURES } from './detection.js';
-import { toFaceletString, validate } from './cube-state.js';
+import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
 import { drawGuide, drawCornerGuide, drawMove } from './overlay.js';
 import { glyphSVG } from './glyph.js';
@@ -35,11 +35,18 @@ const els = {
   perspectiveControl: document.getElementById('perspective-control'),
 };
 
+// Up to this many full passes (each pass = both corners) before giving up. Extra
+// passes only happen when a pass fails to validate/solve; their per-sticker
+// readings are averaged in to ride out lighting/glare (esp. red vs orange).
+const MAX_PASSES = 3;
+
 const state = {
   phase: 'idle', // idle | scanning | solving | guide | error
   scanIndex: 0,
   persp: parseFloat(els.perspective.value), // corner-guide perspective (0..1)
-  faces: {},
+  pass: 1,        // current scan pass (1-based)
+  passes: [],     // completed passes; each is { letter: [9 samples] }
+  faces: {},      // the in-progress pass's accumulated faces
   solution: [],
   moveIndex: 0,
 };
@@ -140,16 +147,19 @@ function swatch(letter) {
 function enterScanning() {
   state.phase = 'scanning';
   state.scanIndex = 0;
+  state.pass = 1;
+  state.passes = [];
   state.faces = {};
   els.captured.innerHTML = '';
   promptCurrentScan();
 }
 
-function promptCurrentScan() {
+function promptCurrentScan(note) {
   const cap = CORNER_CAPTURES[state.scanIndex];
   const ui = CAPTURE_UI[state.scanIndex];
-  setStatus(`Scan ${state.scanIndex + 1}/${CORNER_CAPTURES.length} — <b>${cap.title}</b>`);
-  setHint(ui.hint);
+  const pass = state.pass > 1 ? ` · pass ${state.pass}` : '';
+  setStatus(`Scan ${state.scanIndex + 1}/${CORNER_CAPTURES.length} — <b>${cap.title}</b>${pass}`);
+  setHint((note ? `<b>${note}</b><br>` : '') + ui.hint);
   setGlyph(ui.glyph);
   els.perspectiveControl.hidden = false;
   showButtons({ primary: 'Capture', reset: true });
@@ -174,6 +184,7 @@ function captureCorner() {
   if (state.scanIndex < CORNER_CAPTURES.length) {
     promptCurrentScan();
   } else {
+    state.passes.push(state.faces);
     solveScanned();
   }
 }
@@ -186,16 +197,30 @@ async function solveScanned() {
   els.perspectiveControl.hidden = true;
   showButtons({ primary: null, reset: true });
 
-  const { facelets, counts } = toFaceletString(state.faces);
-  const check = validate(facelets, counts);
-  if (!check.ok) return failScan(check.error);
+  const faces = aggregateFaces(state.passes);
+  state.faces = faces; // aggregate drives the solve-orientation swatches
+  const { facelets, counts } = toFaceletString(faces);
 
-  try {
-    state.solution = await solve(facelets);
-  } catch (err) {
-    return failScan(`Unsolvable state — a color was misread. (${err.message})`);
+  let problem = null;
+  const check = validate(facelets, counts);
+  if (!check.ok) problem = check.error;
+
+  let solution = null;
+  if (!problem) {
+    try {
+      solution = await solve(facelets);
+    } catch (err) {
+      problem = `Unsolvable state — a color was misread. (${err.message})`;
+    }
   }
 
+  if (problem) {
+    // Don't discard the scan — fold in another pass from a fresh angle.
+    if (state.passes.length < MAX_PASSES) return anotherPass();
+    return failScan(problem);
+  }
+
+  state.solution = solution;
   state.moveIndex = 0;
   state.phase = 'guide';
   if (state.solution.length === 0) {
@@ -207,6 +232,19 @@ async function solveScanned() {
     showButtons({ primary: null, prev: true, next: true, reset: true });
     updateStepButtons();
   }
+}
+
+// Re-scan both corners once more; readings are averaged in with prior passes.
+function anotherPass() {
+  state.pass = state.passes.length + 1;
+  state.scanIndex = 0;
+  state.faces = {};
+  els.captured.innerHTML = '';
+  state.phase = 'scanning';
+  promptCurrentScan(
+    'A few colours were ambiguous (often red vs orange). Scan once more from a ' +
+    'slightly different angle — all passes are combined.'
+  );
 }
 
 function failScan(message) {

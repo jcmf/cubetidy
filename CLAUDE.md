@@ -82,6 +82,14 @@ the canvas each frame, so all sampling and overlays share one coordinate space.
   CIE-Lab. This guarantees centers map to themselves and survives lighting shifts.
   Red↔orange is the residual weak spot under warm light.
 
+- **Bad scans fold in more passes instead of failing.** If a completed pass (both
+  corners) doesn't validate or solve, `main.js` re-scans up to `MAX_PASSES` times
+  and `aggregateFaces` (in `cube-state.js`) averages each facelet's RGB across all
+  passes before re-classifying — the user holds the cube at a slightly different
+  angle each pass so per-sticker glare/lighting averages out. Facelet indices are
+  identical across passes (deterministic capture geometry), so averaging needs no
+  registration. Only the final failure surfaces the validate/solve error.
+
 - **Mirroring is display-only** — a `scaleX(-1)` CSS class (`.mirrored`) on the
   `<canvas>`. CSS transforms don't touch the canvas backing store, so
   `getImageData` sampling (and the solve) keep reading the true frame. Don't
