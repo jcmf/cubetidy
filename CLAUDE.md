@@ -7,7 +7,7 @@ each move. Vanilla JS + Canvas, bundled by Vite. No framework.
 
 - `npm run dev` — dev server on `localhost` (camera needs https or localhost).
 - `npm run build` — production build; also the fastest way to catch import/syntax errors.
-- `npm test` — end-to-end pipeline test (`test/pipeline.test.mjs`), no browser needed.
+- `npm test` — pipeline + scan-geometry + corner-geometry tests, no browser needed.
 - `npm run preview:check` — render the overlay/glyph layer with skia-canvas (no
   browser) and pixel-diff against committed goldens in `tools/preview/golden/`.
   Run after touching `overlay.js`/`glyph.js`; a mismatch writes a red-highlighted
@@ -27,7 +27,7 @@ each move. Vanilla JS + Canvas, bundled by Vite. No framework.
 
 ## Architecture (data flow)
 
-`camera.js` → `detection.js` (sample grid) → `colors.js` (classify) →
+`camera.js` → `detection.js` (corner-on sampling) → `colors.js` (classify) →
 `cube-state.js` (assemble + validate) → `solver.js` → `overlay.js` (draw arrows),
 orchestrated by `main.js` (state machine + rAF render loop).
 
@@ -40,23 +40,31 @@ the canvas each frame, so all sampling and overlays share one coordinate space.
   are face letters (not colors). Centers sit at string indices 4,13,22,31,40,49.
   `cubejs` requires `Cube.initSolver()` once (slow table build) before `solve()`.
 
-- **Scan order is `F, R, B, L, U, D`** (`SCAN_STEPS` in `cube-state.js`). The
-  physical holding instruction for each face is chosen so the camera's row-major
-  3×3 maps *directly* onto that face's facelet positions — turn the cube *left*
-  for the four sides (keeping the top fixed), then tilt top/bottom toward the
-  camera for U/D. If you change an instruction, you change the mapping; re-derive
-  carefully or the solve will be wrong while everything still "looks" fine.
-  `test/scan-geometry.test.mjs` guards this contract: it rotates a scrambled cube
-  with cubejs (independent ground truth) per `SCAN_STEPS` and checks the captures
-  reconstruct the true state. Each step also has a `motion` ('spin'/'tiltTop'/
-  'tiltBottom') selecting its instruction glyph — keep `motion`, the hint text,
-  and the rotation in `ROTATION` (the test) in sync.
+- **Scan is corner-on: two captures** (`CORNER_CAPTURES` in `detection.js`). The
+  user points a cube *corner* at the camera so three faces show at once as
+  foreshortened rhombi (a regular-hexagon silhouette); two opposite corners cover
+  all six faces. Each rhombus is a parallelogram, sampled by one affine map whose
+  corner→facelet labelling emits the 9 stickers *already in facelet row-major
+  order*, so everything downstream is unchanged. The second capture is reached by
+  **one** unambiguous motion — a 180° flip about the horizontal screen axis
+  (derived: the URF→DLB pose rotation is `diag(1,−1,−1)`); a 180° flip has no
+  directional ambiguity, which is the whole reason for this design over the old six
+  rotation instructions. `test/corner-geometry.test.mjs` guards the derivation
+  against hardcoded Kociemba corner/edge adjacency (the three faces meet at one
+  real cube corner; stickers along each shared rhombus edge glue correctly). What
+  no offline test can prove — that the *physical holding instruction* matches
+  reality (e.g. "F lower-left" really is F) — needs a real cube in the browser.
+  The old flat-on scan (`SCAN_STEPS` in `cube-state.js`, `sampleGrid`,
+  `scan-geometry.test.mjs`) is left in place but inactive, as a potential fallback.
 
 - **Scan reorientation is shown by an HTML/SVG cube glyph** (`src/glyph.js`) in an
-  un-mirrored overlay, NOT on the canvas — so it reads as a physical "rotate the
+  un-mirrored overlay, NOT on the canvas — so it reads as a physical "hold/flip the
   cube this way" instruction independent of the preview mirror. (The solve arrows,
-  by contrast, are on the canvas and intentionally flip with the cube.) Hints name
-  the target face rather than left/right, which would flip under the mirror.
+  by contrast, are on the canvas and intentionally flip with the cube.) The two
+  corner glyphs are `corner` (bare corner-on cube) and `flip` (cube + 180° vertical
+  flip arrow); keep them, the `CAPTURE_UI` hint text in `main.js`, and the geometry
+  in `CORNER_CAPTURES` in sync. Hints name faces by the held corner or scanned
+  colour, never left/right of a face, which would flip under the mirror.
 
 - **Arrow directions** in `overlay.js` (`ARROWS`) are derived for the fixed frame
   "front center toward camera, top center up": `U`→top row LEFT, `D`→bottom row
@@ -83,9 +91,20 @@ the canvas each frame, so all sampling and overlays share one coordinate space.
 
 ## Scope / next steps
 
-This is the reliable "guided scan → solve → on-face arrows" design, **not**
-continuous 3D tracking of a freely moving cube. `detection.js` is the intended
-seam for that upgrade (contour detection + 6-DoF pose via `solvePnP`, 3D arrows
-with three.js). Classification could move to k-means over all 54 samples to
-better separate red/orange. The pixel-sampling layer is the only part `npm test`
-can't cover — verify camera changes in a real browser.
+This is a **guided** corner-on scan: the user aligns a cube corner to a drawn
+hexagon guide and we sample fixed warped positions — no cube detection yet. Known
+gaps / next steps:
+
+- The two captures are *antipodal* (opposite corners) so they share no faces;
+  registration relies on the user's 180° flip being clean. A 3-capture variant of
+  *overlapping* corners would cover all six faces with shared faces between shots,
+  letting the overlap auto-resolve the orientation (and is the natural step toward
+  real pose estimation).
+- `detection.js` is still the seam for true cube tracking (contour detection +
+  6-DoF pose via `solvePnP`, 3D arrows with three.js), which would drop the
+  align-to-guide requirement entirely.
+- Classification could move to k-means over all 54 samples to better separate
+  red/orange; oblique corner-on faces stress this more than flat-on did.
+
+The pixel-sampling layer is the only part `npm test` can't cover — **verify camera
+changes in a real browser with a physical cube.**
