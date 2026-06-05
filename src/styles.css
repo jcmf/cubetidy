@@ -154,6 +154,14 @@ html, body {
   min-height: 24px;
 }
 #hint b { color: var(--fg); }
+.swatch {
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
+  border-radius: 3px;
+  vertical-align: -2px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
 
 .move-list {
   display: flex;

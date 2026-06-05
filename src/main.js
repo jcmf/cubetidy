@@ -116,10 +116,19 @@ function showCurrentMove() {
     const cls = k === i ? 'current' : k < i ? 'done' : '';
     return `<span class="move-chip ${cls}">${m}</span>`;
   }).join('');
+  // Name the front/up faces by their scanned colour: after a corner scan the
+  // U/F/R labels came from the held corner, so colours are how the user knows
+  // which way to hold the cube for the arrows.
   setHint(
-    `Keep the front center toward the camera, top center up.` +
+    `Hold the ${swatch('F')} centre toward you, ${swatch('U')} centre up.` +
     `<div class="move-list">${chips}</div>`
   );
+}
+
+// A small inline colour chip for a face's scanned centre.
+function swatch(letter) {
+  const c = state.faces[letter]?.[4];
+  return c ? `<i class="swatch" style="background:rgb(${c.r},${c.g},${c.b})"></i>` : '';
 }
 
 // --- phase transitions -----------------------------------------------------
