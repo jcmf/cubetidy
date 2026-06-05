@@ -49,3 +49,104 @@ export function sampleGrid(ctx, region) {
   }
   return samples;
 }
+
+// --- corner-on scan --------------------------------------------------------
+//
+// The corner-on scan points a cube CORNER at the camera, so three faces are
+// visible at once as foreshortened rhombi meeting at a central vertex. Two
+// opposite-corner captures cover all six faces. Because the three faces are seen
+// together, their relative orientation is fixed by geometry rather than by the
+// user following per-face rotation instructions.
+//
+// A perfect corner-on cube projects to a regular hexagon silhouette. Its six
+// outer vertices V0..V5 (V0 at top, going clockwise) plus the centre C are:
+//
+//        V0
+//      /    \            V0 = top        V3 = bottom
+//   V5        V1         V1 = upper-right V4 = lower-left
+//    |   C    |          V2 = lower-right V5 = upper-left
+//   V4        V2
+//      \    /            The three visible faces are the rhombi
+//        V3              (V5 V0 V1 C), (V5 C V3 V4), (C V1 V2 V3).
+//
+// Each rhombus is a parallelogram, so each face is sampled with a single affine
+// map: a face is described by an origin corner O (where facelet 0 sits) and two
+// edge vectors `col` (facelet col 0->2) and `row` (facelet row 0->2), each
+// spanning the whole 3-cell edge. The corner->facelet labelling is derived so
+// that the 9 samples come out in Kociemba facelet row-major order, letting the
+// rest of the pipeline consume them unchanged. The derivation is guarded by
+// test/corner-geometry.test.mjs.
+
+const CORNER_FRACTION = 0.78; // hexagon width as a fraction of the smaller dim
+const COS30 = Math.sqrt(3) / 2;
+
+// The two corner captures and which face sits in each rhombus.
+//   capture 1: URF corner toward camera — U on top, F lower-left, R lower-right
+//   capture 2: opposite (DLB) corner    — D on top, L lower-left, B lower-right
+// `o`/`c`/`r` name the hexagon points (centre 'C', outer 0..5) for the face's
+// origin, col-edge end, and row-edge end. See the ASCII map above.
+export const CORNER_CAPTURES = [
+  {
+    id: 'URF', title: 'first corner', faces: [
+      { letter: 'U', o: 0, c: 1, r: 5 },
+      { letter: 'F', o: 5, c: 'C', r: 4 },
+      { letter: 'R', o: 'C', c: 1, r: 3 },
+    ],
+  },
+  {
+    id: 'DLB', title: 'opposite corner', faces: [
+      { letter: 'D', o: 5, c: 0, r: 'C' },
+      { letter: 'L', o: 3, c: 4, r: 'C' },
+      { letter: 'B', o: 2, c: 3, r: 1 },
+    ],
+  },
+];
+
+// Hexagon centre + the seven named points for a given canvas size.
+export function computeCornerRegion(width, height) {
+  const r = Math.floor(Math.min(width, height) * CORNER_FRACTION) / 2;
+  const cx = width / 2, cy = height / 2;
+  const outer = [
+    { x: cx, y: cy - r },                 // 0 top
+    { x: cx + COS30 * r, y: cy - r / 2 }, // 1 upper-right
+    { x: cx + COS30 * r, y: cy + r / 2 }, // 2 lower-right
+    { x: cx, y: cy + r },                 // 3 bottom
+    { x: cx - COS30 * r, y: cy + r / 2 }, // 4 lower-left
+    { x: cx - COS30 * r, y: cy - r / 2 }, // 5 upper-left
+  ];
+  return { center: { x: cx, y: cy }, r, outer };
+}
+
+// Resolve a point name ('C' or 0..5) to {x,y} for a region.
+function point(region, name) {
+  return name === 'C' ? region.center : region.outer[name];
+}
+
+// The 9 facelet sample points (row-major) for one face of a capture.
+export function faceSamplePoints(region, face) {
+  const o = point(region, face.o);
+  const cEnd = point(region, face.c);
+  const rEnd = point(region, face.r);
+  const col = { x: cEnd.x - o.x, y: cEnd.y - o.y };
+  const row = { x: rEnd.x - o.x, y: rEnd.y - o.y };
+  const pts = [];
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) {
+      const fj = (j + 0.5) / 3, fi = (i + 0.5) / 3;
+      pts.push({ x: o.x + fj * col.x + fi * row.x, y: o.y + fj * col.y + fi * row.y });
+    }
+  }
+  return pts;
+}
+
+// Sample one corner capture, returning { [letter]: [9 samples] } in facelet order.
+export function sampleCorner(ctx, region, capture) {
+  const img = ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height);
+  const patch = Math.max(4, Math.floor(region.r * 0.12));
+  const out = {};
+  for (const face of capture.faces) {
+    out[face.letter] = faceSamplePoints(region, face).map((p) =>
+      samplePatch(img.data, ctx.canvas.width, Math.round(p.x), Math.round(p.y), patch));
+  }
+  return out;
+}
