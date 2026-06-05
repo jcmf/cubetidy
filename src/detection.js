@@ -117,23 +117,45 @@ export function computeCornerRegion(width, height) {
   return { center: { x: cx, y: cy }, r, outer };
 }
 
+// The two captures are opposite corners; the user gets from the first to the
+// second with ONE unambiguous motion: a 180° flip about the horizontal (left-
+// right) screen axis (tip the top edge over until the opposite corner faces the
+// camera). Derivation: the rotation taking the URF-corner pose to the DLB-corner
+// pose works out to diag(1,-1,-1) in screen space. A 180° flip about horizontal
+// has no directional ambiguity and keeps left-right fixed, so it fully pins the
+// second pose (the user can only get it wrong by also twisting about the view
+// axis).
+
 // Resolve a point name ('C' or 0..5) to {x,y} for a region.
 function point(region, name) {
   return name === 'C' ? region.center : region.outer[name];
 }
 
-// The 9 facelet sample points (row-major) for one face of a capture.
-export function faceSamplePoints(region, face) {
+// The affine frame for one face's rhombus: origin corner (facelet 0) and the two
+// edge vectors spanning facelet col 0->2 and row 0->2.
+export function faceFrame(region, face) {
   const o = point(region, face.o);
   const cEnd = point(region, face.c);
   const rEnd = point(region, face.r);
-  const col = { x: cEnd.x - o.x, y: cEnd.y - o.y };
-  const row = { x: rEnd.x - o.x, y: rEnd.y - o.y };
+  return {
+    o,
+    col: { x: cEnd.x - o.x, y: cEnd.y - o.y },
+    row: { x: rEnd.x - o.x, y: rEnd.y - o.y },
+  };
+}
+
+// Map facelet (row i, col j) fractions to a screen point under a face frame.
+function framePoint({ o, col, row }, fj, fi) {
+  return { x: o.x + fj * col.x + fi * row.x, y: o.y + fj * col.y + fi * row.y };
+}
+
+// The 9 facelet sample points (row-major) for one face of a capture.
+export function faceSamplePoints(region, face) {
+  const frame = faceFrame(region, face);
   const pts = [];
   for (let i = 0; i < 3; i++) {
     for (let j = 0; j < 3; j++) {
-      const fj = (j + 0.5) / 3, fi = (i + 0.5) / 3;
-      pts.push({ x: o.x + fj * col.x + fi * row.x, y: o.y + fj * col.y + fi * row.y });
+      pts.push(framePoint(frame, (j + 0.5) / 3, (i + 0.5) / 3));
     }
   }
   return pts;

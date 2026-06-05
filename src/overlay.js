@@ -11,6 +11,7 @@
 // A "2" suffix means the same direction, performed twice.
 
 import { FACE_DISPLAY } from './colors.js';
+import { faceFrame } from './detection.js';
 
 const ARROWS = {
   U:   { kind: 'row', i: 0, dir: 'left' },
@@ -98,6 +99,48 @@ export function drawGuide(ctx, region, active) {
     ctx.lineTo(x + cell * k, y + side);
     ctx.moveTo(x, y + cell * k);
     ctx.lineTo(x + side, y + cell * k);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// The corner-on alignment guide: a hexagon silhouette split into three rhombus
+// faces, each with a 3x3 grid, that the user lines a cube corner up with. The
+// hexagon partition is the same for both captures; only the held corner differs.
+export function drawCornerGuide(ctx, region, active) {
+  const { outer, center } = region;
+  ctx.save();
+
+  // Hexagon silhouette.
+  ctx.strokeStyle = active ? 'rgba(79,140,255,0.95)' : 'rgba(255,255,255,0.65)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  outer.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+  ctx.closePath();
+  ctx.stroke();
+
+  // Internal spokes (the three near edges meeting at the centre corner).
+  ctx.beginPath();
+  for (const k of [1, 3, 5]) {
+    ctx.moveTo(center.x, center.y);
+    ctx.lineTo(outer[k].x, outer[k].y);
+  }
+  ctx.stroke();
+
+  // 3x3 grid within each rhombus.
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  const FACES = [{ o: 0, c: 1, r: 5 }, { o: 5, c: 'C', r: 4 }, { o: 'C', c: 1, r: 3 }];
+  for (const face of FACES) {
+    const fr = faceFrame(region, face);
+    const at = (fj, fi) => ({ x: fr.o.x + fj * fr.col.x + fi * fr.row.x, y: fr.o.y + fj * fr.col.y + fi * fr.row.y });
+    ctx.beginPath();
+    for (let k = 1; k < 3; k++) {
+      const f = k / 3;
+      const a = at(f, 0), b = at(f, 1), c = at(0, f), d = at(1, f);
+      ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+      ctx.moveTo(c.x, c.y); ctx.lineTo(d.x, d.y);
+    }
     ctx.stroke();
   }
   ctx.restore();

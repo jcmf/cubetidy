@@ -20,7 +20,8 @@ import { Canvas, loadImage, FontLibrary } from 'skia-canvas';
 import { mkdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { drawGuide, drawMove, drawClassified } from '../src/overlay.js';
+import { drawGuide, drawMove, drawClassified, drawCornerGuide } from '../src/overlay.js';
+import { computeCornerRegion } from '../src/detection.js';
 import { glyphSVG } from '../src/glyph.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -124,10 +125,21 @@ async function sceneGlyphs() {
   return canvas;
 }
 
+async function sceneCornerGuide() {
+  const W = 720, H = 720;
+  const canvas = new Canvas(W, H);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0e1116';
+  ctx.fillRect(0, 0, W, H);
+  drawCornerGuide(ctx, computeCornerRegion(W, H), true);
+  return canvas;
+}
+
 const SCENES = [
   { name: '1-scan-guide', render: sceneScanGuide },
   { name: '2-move-arrows', render: sceneMoveArrows },
   { name: '3-glyphs', render: sceneGlyphs },
+  { name: '4-corner-guide', render: sceneCornerGuide },
 ];
 
 // --- render + diff ---------------------------------------------------------
