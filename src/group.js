@@ -12,6 +12,8 @@
 //
 // Offline-tested against synthetic projected cubes (test/group.test.mjs).
 
+import { homographyDLT, applyHomography } from './pose.js';
+
 const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y });
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 const len = (a) => Math.hypot(a.x, a.y);
@@ -133,4 +135,29 @@ export function findFaceGrids(quads, opts = {}) {
     if (pool.length < o.minInliers) break;
   }
   return faces;
+}
+
+// Fit a homography from a face's labelled cells (grid (col,row) -> image) and
+// project the FULL 3x3, filling in the stickers detection missed. This is the
+// payoff of grouping: a partial, jittery detection becomes a complete face whose
+// every sticker has a known image position to sample and overlay. Returns
+//   { H, cells: [{ row, col, x, y, detected }*9], outline: [4 corners] }
+// or null if the cells don't span a 2D grid (homography under-determined).
+export function fitFaceGrid(face) {
+  const cells = face.cells;
+  const cols = new Set(cells.map((c) => c.col)), rows = new Set(cells.map((c) => c.row));
+  if (cells.length < 4 || cols.size < 2 || rows.size < 2) return null;
+
+  const H = homographyDLT(cells.map((c) => ({ X: [c.col, c.row], u: [c.quad.center.x, c.quad.center.y] })));
+  const detected = new Set(cells.map((c) => `${c.row},${c.col}`));
+  const projected = [];
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      const [x, y] = applyHomography(H, [c, r]);
+      projected.push({ row: r, col: c, x, y, detected: detected.has(`${r},${c}`) });
+    }
+  }
+  const corner = (c, r) => { const [x, y] = applyHomography(H, [c, r]); return { x, y }; };
+  const outline = [corner(-0.5, -0.5), corner(2.5, -0.5), corner(2.5, 2.5), corner(-0.5, 2.5)];
+  return { H, cells: projected, outline };
 }

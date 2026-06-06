@@ -6,7 +6,7 @@
 //
 // Run: npm test
 
-import { findFaceGrids } from '../src/group.js';
+import { findFaceGrids, fitFaceGrid } from '../src/group.js';
 import { estimateIntrinsics, project } from '../src/pose.js';
 
 let pass = 0, fail = 0;
@@ -131,6 +131,34 @@ function labellingIsGridConsistent(cells) {
   check('corner-on: each face is a full 3x3', faces.every((f) => cellsCoverFullGrid(f.cells)));
   check('corner-on: each face groups one source face only',
     faces.every((f) => new Set(f.cells.map((c) => c.quad.tag)).size === 1));
+})();
+
+// --- 5. fitFaceGrid fills in the stickers detection missed -----------------
+
+(() => {
+  const K = estimateIntrinsics(1280, 720, 60);
+  const pose = { R: [[0.9, -0.08, 0.43], [0.12, 0.99, -0.06], [-0.42, 0.11, 0.90]], t: [0.4, -0.2, 8.5] };
+  const truth = [];
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+    const [x, y] = project(K, pose, [c - 1, r - 1, 0]);
+    truth.push({ row: r, col: c, x, y });
+  }
+  // Keep 6 of 9 (drop centre + two corners) — a plausible partial detection.
+  const dropped = new Set(['1,1', '0,0', '2,2']);
+  const kept = truth.filter((t) => !dropped.has(`${t.row},${t.col}`))
+    .map((t) => ({ row: t.row, col: t.col, quad: quad({ x: t.x, y: t.y }, 'face', 9000) }));
+
+  const fit = fitFaceGrid({ cells: kept });
+  check('fit: returns a fitted grid from 6 cells', !!fit);
+  check('fit: projects all 9 cells', fit?.cells.length === 9, `got ${fit?.cells.length}`);
+  let worst = 0;
+  for (const t of truth) {
+    const p = fit.cells.find((c) => c.row === t.row && c.col === t.col);
+    worst = Math.max(worst, Math.hypot(p.x - t.x, p.y - t.y));
+  }
+  check('fit: every projected cell (incl. the 3 missing) lands on the true sticker', worst < 0.5, `worst=${worst.toFixed(3)}px`);
+  check('fit: dropped cells flagged not-detected, kept flagged detected', fit.cells.every((c) =>
+    c.detected === !dropped.has(`${c.row},${c.col}`)));
 })();
 
 console.log(`\n${pass} passed, ${fail} failed`);
