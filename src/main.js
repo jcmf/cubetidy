@@ -362,25 +362,35 @@ els.primary.addEventListener('click', async () => {
   }
 });
 
-// ?detect: click the preview (or press 'c') to download the current CLEAN frame
-// (raw camera, no overlays/mirror) as a PNG — real test data for offline tuning.
+// ?detect: download the current CLEAN frame (raw camera, no overlays/mirror) as a
+// PNG — real test data for offline tuning. Triggerable via a visible button, a
+// click on the image, or the 'c' key.
 function captureFrame() {
-  if (!video.videoWidth) return;
+  if (!video.videoWidth) { console.warn('[capture] no camera frame yet — start the camera first'); return; }
   const off = document.createElement('canvas');
   off.width = video.videoWidth;
   off.height = video.videoHeight;
   off.getContext('2d').drawImage(video, 0, 0);
-  off.toBlob((blob) => {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `cube-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }, 'image/png');
+  // Synchronous toDataURL keeps us inside the user-gesture so the download isn't
+  // blocked (toBlob's async callback can lose the gesture and be silently denied).
+  const a = document.createElement('a');
+  a.href = off.toDataURL('image/png');
+  a.download = `cube-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+  document.body.appendChild(a); // Firefox needs the link in the DOM to click it
+  a.click();
+  a.remove();
+  console.log(`[capture] saved ${a.download} (${off.width}x${off.height})`);
 }
 if (DEBUG_DETECT) {
+  const btn = document.createElement('button');
+  btn.textContent = '📷 Save frame';
+  btn.style.cssText = 'position:fixed;left:8px;bottom:84px;z-index:1000;padding:10px 14px;' +
+    'font:14px system-ui;background:#111;color:#fff;border:1px solid #666;border-radius:8px;cursor:pointer';
+  btn.addEventListener('click', captureFrame);
+  document.body.appendChild(btn);
   canvas.addEventListener('click', captureFrame);
   window.addEventListener('keydown', (e) => { if (e.key === 'c') captureFrame(); });
+  console.log('[capture] ready — use the "📷 Save frame" button (or click the image / press "c")');
 }
 
 els.next.addEventListener('click', () => step(1));
