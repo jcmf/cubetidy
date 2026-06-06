@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "preview:check": "node tools/preview.mjs --check",
     "preview:update": "node tools/preview.mjs --update",
-    "test": "node test/pipeline.test.mjs && node test/scan-geometry.test.mjs && node test/corner-geometry.test.mjs && node test/colors.test.mjs && node test/pose.test.mjs && node test/group.test.mjs"
+    "test": "node test/pipeline.test.mjs && node test/scan-geometry.test.mjs && node test/corner-geometry.test.mjs && node test/colors.test.mjs && node test/pose.test.mjs && node test/group.test.mjs && node test/cube-pose.test.mjs"
   },
   "license": "MIT",
   "dependencies": {
