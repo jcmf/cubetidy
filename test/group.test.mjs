@@ -161,5 +161,22 @@ function labellingIsGridConsistent(cells) {
     c.detected === !dropped.has(`${c.row},${c.col}`)));
 })();
 
+// --- 6. degenerate (near-collinear) cell sets are rejected ------------------
+
+(() => {
+  // Five cells whose centres lie almost on a line (only one row of the face really
+  // detected) — a homography here would fling the projected grid off the cube.
+  const line = [[0, 0], [1, 0], [2, 0], [0, 1], [1, 1]].map(([col, row], i) => ({
+    row, col, quad: quad({ x: 200 + i * 50, y: 300 + i * 0.4 }, 'face', 1800),
+  }));
+  check('degenerate: near-collinear cells are rejected', fitFaceGrid({ cells: line }) === null);
+
+  // A genuine 2x2 block fits fine.
+  const block = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([col, row]) => ({
+    row, col, quad: quad({ x: 200 + col * 50, y: 300 + row * 48 }, 'face', 1800),
+  }));
+  check('degenerate: a real 2x2 block still fits', fitFaceGrid({ cells: block }) !== null);
+})();
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

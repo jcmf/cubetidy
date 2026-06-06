@@ -27,6 +27,20 @@ function latticeCoords(p, origin, du, dv) {
   return { i: (dv.y * dx - dv.x * dy) / det, j: (-du.y * dx + du.x * dy) / det };
 }
 
+// Ratio of the smaller to larger eigenvalue of a point set's covariance:
+// ~0 = points collinear, ~1 = isotropic. Used to reject degenerate face fits.
+function spread2D(points) {
+  let mx = 0, my = 0;
+  for (const p of points) { mx += p.x; my += p.y; }
+  mx /= points.length; my /= points.length;
+  let sxx = 0, sxy = 0, syy = 0;
+  for (const p of points) { const dx = p.x - mx, dy = p.y - my; sxx += dx * dx; sxy += dx * dy; syy += dy * dy; }
+  const tr = sxx + syy, det = sxx * syy - sxy * sxy;
+  const disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+  const l1 = tr / 2 + disc;
+  return l1 > 0 ? (tr / 2 - disc) / l1 : 0;
+}
+
 const areaRatio = (a, b) => {
   const r = (a.area ?? 1) / (b.area ?? 1);
   return r < 1 ? 1 / r : r;
@@ -143,10 +157,15 @@ export function findFaceGrids(quads, opts = {}) {
 // every sticker has a known image position to sample and overlay. Returns
 //   { H, cells: [{ row, col, x, y, detected }*9], outline: [4 corners] }
 // or null if the cells don't span a 2D grid (homography under-determined).
-export function fitFaceGrid(face) {
+export function fitFaceGrid(face, opts = {}) {
+  const o = { minSpread: 0.05, ...opts };
   const cells = face.cells;
   const cols = new Set(cells.map((c) => c.col)), rows = new Set(cells.map((c) => c.row));
   if (cells.length < 4 || cols.size < 2 || rows.size < 2) return null;
+  // Near-collinear cells (a single detected row/line) make the homography
+  // under-determined, so the projected grid flies off the cube. Require the cell
+  // centres to span 2D: the covariance's smaller/larger eigenvalue ratio.
+  if (spread2D(cells.map((c) => c.quad.center)) < o.minSpread) return null;
 
   const H = homographyDLT(cells.map((c) => ({ X: [c.col, c.row], u: [c.quad.center.x, c.quad.center.y] })));
   const detected = new Set(cells.map((c) => `${c.row},${c.col}`));

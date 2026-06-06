@@ -25,7 +25,8 @@ const detectOpts = (() => {
   }
   return o;
 })();
-if (DEBUG_DETECT) console.log('[detect] debug overlay ON; opts =', detectOpts, '— start the camera; outlines appear once OpenCV is ready');
+if (DEBUG_DETECT) console.log('[detect] debug overlay ON; opts =', detectOpts,
+  '— start the camera. Click the preview (or press "c") to download the current frame as test data.');
 
 // Per-capture UI copy for the corner-on scan. Geometry lives in CORNER_CAPTURES;
 // hints name the held corner relative to the previous one (never left/right of a
@@ -360,6 +361,27 @@ els.primary.addEventListener('click', async () => {
     enterScanning(); // "Scan another"
   }
 });
+
+// ?detect: click the preview (or press 'c') to download the current CLEAN frame
+// (raw camera, no overlays/mirror) as a PNG — real test data for offline tuning.
+function captureFrame() {
+  if (!video.videoWidth) return;
+  const off = document.createElement('canvas');
+  off.width = video.videoWidth;
+  off.height = video.videoHeight;
+  off.getContext('2d').drawImage(video, 0, 0);
+  off.toBlob((blob) => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `cube-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, 'image/png');
+}
+if (DEBUG_DETECT) {
+  canvas.addEventListener('click', captureFrame);
+  window.addEventListener('keydown', (e) => { if (e.key === 'c') captureFrame(); });
+}
 
 els.next.addEventListener('click', () => step(1));
 els.prev.addEventListener('click', () => step(-1));
