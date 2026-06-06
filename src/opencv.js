@@ -13,14 +13,20 @@ let latest = [];
 
 export function startCV() {
   if (worker) return;
+  console.log('[cv] worker starting…');
+  // Module worker: Vite serves these natively in dev and code-splits the worker's
+  // dynamic import of OpenCV, keeping the ~10 MB out of the app bundle.
   worker = new Worker(new URL('./cv-worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = (e) => {
     const msg = e.data;
-    if (msg.type === 'ready') ready = true;
-    else if (msg.type === 'quads') { inFlight = false; latest = msg.quads; }
-    else if (msg.type === 'error') { inFlight = false; console.warn('cv-worker:', msg.message); }
+    if (msg.type === 'ready') { ready = true; console.log('[cv] worker ready'); }
+    else if (msg.type === 'quads') {
+      inFlight = false;
+      if (!latest.length && msg.quads.length) console.log('[cv] first detection:', msg.quads.length, 'quads');
+      latest = msg.quads;
+    } else if (msg.type === 'error') { inFlight = false; console.warn('[cv] worker error:', msg.message); }
   };
-  worker.onerror = (e) => console.warn('cv-worker error', e.message || e);
+  worker.onerror = (e) => console.warn('[cv] worker onerror', e.message || e);
 }
 
 // True once OpenCV's runtime is up in the worker.

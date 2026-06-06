@@ -1,21 +1,35 @@
-// OpenCV runs entirely in this worker so the ~10 MB module load, WASM
-// instantiation, and per-frame Canny/contour work never block the main thread
-// (loading it on the UI thread froze the page). The main thread posts frames and
-// gets sticker quads back; all cv.* lives here.
+// OpenCV runs in this module worker so the ~10 MB load, WASM init, and per-frame
+// detection stay off the main thread (loading it on the UI thread froze the page
+// after first render). The main thread posts frames in and gets sticker quads back.
 //
-// detect.js is cv-injected and DOM-free, so it runs unchanged in the worker.
+// Readiness is detected by POLLING for cv.Mat, NOT by onRuntimeInitialized.
+// OpenCV's runtime initializes fine here (its wasm is an embedded data URI, so no
+// fetch/environment-specific loading is involved — confirmed by simulating this
+// worker env), but through the dynamic import + bundler the onRuntimeInitialized
+// callback proved unreliable: it can fire before this .then runs, or on a different
+// object reference than the imported default. A working Mat constructor is the
+// ground truth, and appears ~80 ms after the import resolves.
+//
+// detect.js is cv-injected and DOM-free, so it runs here unchanged.
 
 import { detectStickerQuads } from './detect.js';
 
 let cv = null;
-
-// Pull OpenCV in off the main thread; signal ready once its runtime is up.
+console.log('[cv-worker] importing OpenCV…');
 import('@techstark/opencv-js').then((mod) => {
-  const c = mod.default ?? mod;
-  const ready = () => { cv = c; postMessage({ type: 'ready' }); };
-  if (c && c.Mat) ready();
-  else c.onRuntimeInitialized = ready;
-}).catch((err) => postMessage({ type: 'error', message: String(err) }));
+  cv = mod.default ?? mod;
+  console.log('[cv-worker] import resolved (default:', typeof cv, ', has Mat:', !!(cv && cv.Mat), ')');
+  const t0 = Date.now();
+  const waitReady = () => {
+    if (cv && cv.Mat) { console.log('[cv-worker] OpenCV runtime ready'); postMessage({ type: 'ready' }); return; }
+    if (Date.now() - t0 > 20000) { postMessage({ type: 'error', message: 'OpenCV init timed out (cv.Mat never appeared)' }); return; }
+    setTimeout(waitReady, 50);
+  };
+  waitReady();
+}).catch((err) => {
+  console.error('[cv-worker] OpenCV load failed', err);
+  postMessage({ type: 'error', message: String(err) });
+});
 
 self.onmessage = (e) => {
   const msg = e.data;

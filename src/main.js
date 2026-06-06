@@ -11,7 +11,8 @@ import { startCV, cvReady, requestDetect, latestQuads } from './opencv.js';
 // Detection runs in a worker; this is pure visualization, not wired into the
 // scan state machine yet.
 const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
-const detectState = { frame: 0, lastCount: -1 };
+const detectState = { frame: 0, lastStatus: '' };
+if (DEBUG_DETECT) console.log('[detect] debug overlay ON — start the camera; outlines appear once the OpenCV worker is ready');
 
 // Per-capture UI copy for the corner-on scan. Geometry lives in CORNER_CAPTURES;
 // hints name the held corner relative to the previous one (never left/right of a
@@ -91,16 +92,20 @@ function render() {
 // frame), then overlay whatever quads it last returned. Count goes to the status
 // bar, never the canvas (mirrored text would read backwards).
 function runDetectOverlay() {
-  if (!cvReady()) return;
+  if (!cvReady()) { setDetectStatus('detect: loading OpenCV…'); return; }
   if (detectState.frame++ % 3 === 0) {
     requestDetect(ctx.getImageData(0, 0, canvas.width, canvas.height));
   }
   const quads = latestQuads();
-  if (quads.length !== detectState.lastCount) {
-    detectState.lastCount = quads.length;
-    setStatus(`detect: <b>${quads.length}</b> sticker quads`);
-  }
+  setDetectStatus(`detect: <b>${quads.length}</b> sticker quads`);
   drawDetections(ctx, quads);
+}
+
+// Update the status bar only when the text changes (avoids per-frame DOM churn).
+function setDetectStatus(html) {
+  if (html === detectState.lastStatus) return;
+  detectState.lastStatus = html;
+  setStatus(html);
 }
 
 function drawSolved(region) {
