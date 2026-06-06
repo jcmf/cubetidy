@@ -24,8 +24,9 @@ export const DETECT_DEFAULTS = {
   blur: 5,              // Gaussian blur kernel (odd); tames sensor noise
 
   // canny method
-  cannyLo: 30,          // Canny hysteresis thresholds (lowered to catch sticker
-  cannyHi: 90,          //   borders, which are weaker than typical clutter edges)
+  cannyLo: 20,          // Canny hysteresis thresholds — tuned low on real cubes
+  cannyHi: 50,          //   (neon/sticker tile borders are weak; hi=50 vs 90 went
+                        //   from 1 detected face to 2 on the sample frames)
   dilateIters: 1,       // dilate edges to close gaps into loops (1: avoid merging
                         //   adjacent stickers into one blob)
 
