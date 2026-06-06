@@ -223,6 +223,28 @@ export function drawFittedFaces(ctx, fits) {
   ctx.restore();
 }
 
+// Draw a recovered cube pose: each visible face's projected 3x3 (cells in row-major
+// order) as a connected grid + dots, per-face colour. Geometry only.
+export function drawCube(ctx, faces) {
+  ctx.save();
+  faces.forEach((f, fi) => {
+    const color = FACE_COLORS[fi % FACE_COLORS.length];
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = 2;
+    const at = (r, c) => f.cells[r * 3 + c];
+    ctx.beginPath();
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+      const p = at(r, c);
+      if (c < 2) { const q = at(r, c + 1); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); }
+      if (r < 2) { const q = at(r + 1, c); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); }
+    }
+    ctx.stroke();
+    for (const p of f.cells) { ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill(); }
+  });
+  ctx.restore();
+}
+
 // Draw the AR arrow for a single move on the front-facing grid.
 export function drawMove(ctx, region, token) {
   const { x, y, side, cell } = region;

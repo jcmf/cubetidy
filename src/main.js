@@ -2,17 +2,19 @@ import { startCamera } from './camera.js';
 import { computeRegion, computeCornerRegion, sampleCorner, CORNER_CAPTURES } from './detection.js';
 import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
-import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawFittedFaces } from './overlay.js';
+import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawCube } from './overlay.js';
 import { glyphSVG } from './glyph.js';
 import { startCV, cvReady, requestDetect, latestQuads } from './opencv.js';
-import { findFaceGrids, fitFaceGrid, dedupeFaces } from './group.js';
+import { findFaceGrids, fitFaceGrid } from './group.js';
+import { estimateCubePose } from './cube-pose.js';
+import { estimateIntrinsics } from './pose.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
 // Detection runs in a worker; this is pure visualization, not wired into the
 // scan state machine yet.
 const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
-const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, smoothed: [] };
+const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null };
 // Every query param besides `detect` overrides a DETECT_DEFAULTS knob, so detection
 // can be tuned live from the URL without a rebuild, e.g.
 //   ?detect&method=adaptive&blockSize=51&C=7   or   ?detect&cannyLo=20&minFill=0.4
@@ -24,11 +26,11 @@ const detectOpts = (() => {
   }
   return o;
 })();
-// Temporal smoothing of the fitted faces (overridable via the URL detectOpts).
+// Temporal smoothing of the cube pose (overridable via the URL detectOpts).
 const SMOOTH = {
-  alpha: detectOpts.smoothAlpha ?? 0.35, // EMA weight toward each new fit (lower = smoother)
-  assoc: detectOpts.assocFrac ?? 0.6,    // match to the previous frame within this * face size
-  maxMiss: detectOpts.maxMiss ?? 6,      // keep a face this many updates after it drops out
+  alpha: detectOpts.smoothAlpha ?? 0.35, // EMA weight toward each new estimate (lower = smoother)
+  maxMiss: detectOpts.maxMiss ?? 6,      // hold the last good pose this many updates through dropouts
+  minScore: detectOpts.minScore ?? 6,    // ignore weak estimates (few matched stickers = likely wrong)
 };
 if (DEBUG_DETECT) console.log('[detect] debug overlay ON; opts =', detectOpts,
   '— start the camera. Click the preview (or press "c") to download the current frame as test data.');
@@ -131,61 +133,40 @@ function drawDetectResults() {
   if (quads !== detectState.lastQuads) { // recompute only when the worker returns new quads
     detectState.lastQuads = quads;
     detectState.quadCount = quads.length;
-    const faces = findFaceGrids(quads, detectOpts);
-    const fits = dedupeFaces(faces.map((f) => fitFaceGrid(f, detectOpts)).filter(Boolean), detectOpts);
-    smoothFits(fits);
+    const K = estimateIntrinsics(canvas.width, canvas.height);
+    const fits = findFaceGrids(quads, detectOpts).map((f) => fitFaceGrid(f, detectOpts)).filter(Boolean);
+    detectState.cube = smoothCube(estimateCubePose(fits, K, quads, detectOpts));
   }
   drawDetections(ctx, quads);
-  drawFittedFaces(ctx, detectState.smoothed);
+  if (detectState.cube) drawCube(ctx, detectState.cube.faces);
 
-  const seen = detectState.smoothed.reduce((n, f) => n + f.cells.filter((c) => c.detected).length, 0);
+  const cube = detectState.cube;
   setDetectStatus(
     `detect[${detectOpts.method || 'canny'}]: <b>${detectState.quadCount}</b> quads · ` +
-    `<b>${detectState.smoothed.length}</b> face(s) · ${seen} seen`);
+    (cube ? `cube <b>${cube.faces.length}</b> faces · score ${cube.score}` : 'no cube'));
 }
 
-const centroidOf = (pts) => {
-  let x = 0, y = 0;
-  for (const p of pts) { x += p.x; y += p.y; }
-  return { x: x / pts.length, y: y / pts.length };
-};
-
-// EMA-smooth a fresh set of fits against detectState.smoothed: associate each to
-// the nearest previous face by centroid (canonical cell order makes the point-wise
-// EMA valid), ease matched faces toward the new fit, and hold unmatched previous
-// faces for a few updates so brief dropouts don't blink.
-function smoothFits(fits) {
-  const prev = detectState.smoothed;
-  const used = new Array(prev.length).fill(false);
+// EMA-smooth the cube pose across detection updates: ignore weak estimates (likely
+// wrong), point-wise blend the projected faces toward each new good one (face order
+// is stable while the pose is), and hold the last good pose through brief dropouts.
+// Temporal fusion is what tames the residual per-frame pose noise when held still.
+function smoothCube(cube) {
+  const prev = detectState.cube;
+  if (!cube || cube.score < SMOOTH.minScore) {
+    return prev && (prev.miss ?? 0) < SMOOTH.maxMiss ? { ...prev, miss: (prev.miss ?? 0) + 1 } : null;
+  }
   const a = SMOOTH.alpha;
-  const lerp = (p, q) => ({ ...q, x: p.x + a * (q.x - p.x), y: p.y + a * (q.y - p.y) });
-  const next = [];
-  for (const fit of fits) {
-    const c = centroidOf(fit.cells);
-    const size = Math.hypot(fit.outline[2].x - fit.outline[0].x, fit.outline[2].y - fit.outline[0].y);
-    let bi = -1, bd = Infinity;
-    prev.forEach((s, i) => {
-      if (used[i]) return;
-      const sc = centroidOf(s.cells);
-      const d = Math.hypot(sc.x - c.x, sc.y - c.y);
-      if (d < bd) { bd = d; bi = i; }
-    });
-    if (bi >= 0 && bd < size * SMOOTH.assoc) {
-      used[bi] = true;
-      const s = prev[bi];
-      next.push({
-        cells: s.cells.map((p, i) => lerp(p, fit.cells[i])),
-        outline: s.outline.map((p, i) => lerp(p, fit.outline[i])),
-        miss: 0,
-      });
-    } else {
-      next.push({ cells: fit.cells.map((p) => ({ ...p })), outline: fit.outline.map((p) => ({ ...p })), miss: 0 });
-    }
+  if (prev && prev.faces.length === cube.faces.length) {
+    const faces = cube.faces.map((f, fi) => ({
+      normal: f.normal,
+      cells: f.cells.map((p, i) => {
+        const q = prev.faces[fi].cells[i];
+        return { x: q.x + a * (p.x - q.x), y: q.y + a * (p.y - q.y) };
+      }),
+    }));
+    return { faces, score: cube.score, miss: 0 };
   }
-  for (let i = 0; i < prev.length; i++) {
-    if (!used[i] && prev[i].miss < SMOOTH.maxMiss) next.push({ ...prev[i], miss: prev[i].miss + 1 });
-  }
-  detectState.smoothed = next;
+  return { faces: cube.faces.map((f) => ({ normal: f.normal, cells: f.cells.map((p) => ({ ...p })) })), score: cube.score, miss: 0 };
 }
 
 // Update the status bar only when the text changes (avoids per-frame DOM churn).

@@ -13,9 +13,11 @@ import { Canvas, loadImage } from 'skia-canvas';
 import { basename, dirname, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import cv from '@techstark/opencv-js';
+import { estimateIntrinsics } from '../src/pose.js';
 import { detectStickerQuads } from '../src/detect.js';
-import { findFaceGrids, fitFaceGrid, dedupeFaces } from '../src/group.js';
-import { drawDetections, drawFittedFaces } from '../src/overlay.js';
+import { findFaceGrids, fitFaceGrid } from '../src/group.js';
+import { estimateCubePose } from '../src/cube-pose.js';
+import { drawDetections, drawCube } from '../src/overlay.js';
 
 await new Promise((r) => { if (cv && cv.Mat) return r(); cv.onRuntimeInitialized = r; });
 
@@ -38,12 +40,13 @@ for (const p of paths) {
   ctx.drawImage(img, 0, 0);
   const imageData = ctx.getImageData(0, 0, img.width, img.height);
 
+  const K = estimateIntrinsics(img.width, img.height);
   const quads = detectStickerQuads(cv, imageData, opts);
-  const faces = findFaceGrids(quads, opts);
-  const fits = dedupeFaces(faces.map((f) => fitFaceGrid(f, opts)).filter(Boolean), opts);
+  const fits = findFaceGrids(quads, opts).map((f) => fitFaceGrid(f, opts)).filter(Boolean);
+  const cube = estimateCubePose(fits, K, quads, opts);
 
   drawDetections(ctx, quads);
-  drawFittedFaces(ctx, fits);
+  if (cube) drawCube(ctx, cube.faces);
 
   const outDir = join(dirname(p), 'annotated');
   mkdirSync(outDir, { recursive: true });
@@ -51,7 +54,7 @@ for (const p of paths) {
   await canvas.saveAs(join(outDir, base + '.png'));
 
   // Zoomed crop around everything detected — the cube is usually small in frame.
-  const pts = [...quads.flatMap((q) => q.corners), ...fits.flatMap((f) => f.outline)];
+  const pts = [...quads.flatMap((q) => q.corners), ...(cube ? cube.faces.flatMap((f) => f.cells) : [])];
   if (pts.length) {
     const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y), pad = 40;
     const x0 = Math.max(0, Math.min(...xs) - pad), y0 = Math.max(0, Math.min(...ys) - pad);
@@ -63,9 +66,8 @@ for (const p of paths) {
     await zc.saveAs(join(outDir, base + '.zoom.png'));
   }
 
-  const perFace = fits.map((f) => `${f.cells.filter((c) => c.detected).length}cells/reproj${f.reproj.toFixed(1)}px`).join(' , ');
   console.log(`${base} ${img.width}x${img.height} | method=${opts.method || 'canny'} | ` +
-    `${quads.length} quads | ${faces.length} grids | ${fits.length} faces${fits.length ? ` (cells seen: ${perFace})` : ''} -> annotated/${base}.png`);
+    `${quads.length} quads | ${fits.length} face-fits | cube: ${cube ? `${cube.faces.length} faces, score ${cube.score}` : 'none'} -> annotated/${base}.png`);
  } catch (err) {
   console.error(`${basename(p)}: FAILED — ${err.message || err}`);
  }
