@@ -31,6 +31,9 @@ const SMOOTH = {
   alpha: detectOpts.smoothAlpha ?? 0.35, // EMA weight toward each new estimate (lower = smoother)
   maxMiss: detectOpts.maxMiss ?? 6,      // hold the last good pose this many updates through dropouts
   minScore: detectOpts.minScore ?? 6,    // ignore weak estimates (few matched stickers = likely wrong)
+  gateFrac: detectOpts.gateFrac ?? 0.4,  // a new estimate must land within this * cube radius of the
+                                         //   locked one (held still), else it's a jump (false lock)
+  reacquire: detectOpts.reacquire ?? 8,  // ...persisting this many updates = a real move; re-lock
 };
 if (DEBUG_DETECT) console.log('[detect] debug overlay ON; opts =', detectOpts,
   '— start the camera. Click the preview (or press "c") to download the current frame as test data.');
@@ -146,27 +149,48 @@ function drawDetectResults() {
     (cube ? `cube <b>${cube.faces.length}</b> faces · score ${cube.score}` : 'no cube'));
 }
 
-// EMA-smooth the cube pose across detection updates: ignore weak estimates (likely
-// wrong), point-wise blend the projected faces toward each new good one (face order
-// is stable while the pose is), and hold the last good pose through brief dropouts.
-// Temporal fusion is what tames the residual per-frame pose noise when held still.
+// Centroid + RMS radius of a cube's projected sticker cells (a pose-agnostic
+// summary for the motion gate).
+function cubeStat(faces) {
+  const pts = faces.flatMap((f) => f.cells);
+  const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+  const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+  const rad = Math.sqrt(pts.reduce((s, p) => s + (p.x - cx) ** 2 + (p.y - cy) ** 2, 0) / pts.length);
+  return { cx, cy, rad };
+}
+const cloneFaces = (faces) => faces.map((f) => ({ normal: f.normal, cells: f.cells.map((p) => ({ ...p })) }));
+const acquire = (cube) => ({ faces: cloneFaces(cube.faces), score: cube.score, stat: cubeStat(cube.faces), miss: 0, reject: 0 });
+
+// Temporally fuse cube-pose estimates. The cube is held roughly still, so:
+//  - weak estimates (score < minScore) are ignored (hold the last good pose);
+//  - a good estimate that JUMPS far from the locked pose is rejected as a false
+//    lock / bad frame — unless it persists, which means a real move (re-acquire);
+//  - estimates near the locked pose are EMA-blended. This motion gate is what makes
+//    the overlay steady: it sticks to the consensus and ignores intermittent garbage.
 function smoothCube(cube) {
   const prev = detectState.cube;
   if (!cube || cube.score < SMOOTH.minScore) {
-    return prev && (prev.miss ?? 0) < SMOOTH.maxMiss ? { ...prev, miss: (prev.miss ?? 0) + 1 } : null;
+    return prev && prev.miss < SMOOTH.maxMiss ? { ...prev, miss: prev.miss + 1 } : null;
   }
+  if (!prev || !prev.stat) return acquire(cube);
+
+  const stat = cubeStat(cube.faces);
+  const moved = Math.hypot(stat.cx - prev.stat.cx, stat.cy - prev.stat.cy) > SMOOTH.gateFrac * prev.stat.rad
+    || stat.rad / (prev.stat.rad || 1) < 0.7 || stat.rad / (prev.stat.rad || 1) > 1.4;
+  if (moved) {
+    const reject = (prev.reject ?? 0) + 1;
+    return reject < SMOOTH.reacquire ? { ...prev, miss: 0, reject } : acquire(cube);
+  }
+  if (prev.faces.length !== cube.faces.length) return acquire(cube);
   const a = SMOOTH.alpha;
-  if (prev && prev.faces.length === cube.faces.length) {
-    const faces = cube.faces.map((f, fi) => ({
-      normal: f.normal,
-      cells: f.cells.map((p, i) => {
-        const q = prev.faces[fi].cells[i];
-        return { x: q.x + a * (p.x - q.x), y: q.y + a * (p.y - q.y) };
-      }),
-    }));
-    return { faces, score: cube.score, miss: 0 };
-  }
-  return { faces: cube.faces.map((f) => ({ normal: f.normal, cells: f.cells.map((p) => ({ ...p })) })), score: cube.score, miss: 0 };
+  const faces = cube.faces.map((f, fi) => ({
+    normal: f.normal,
+    cells: f.cells.map((p, i) => {
+      const q = prev.faces[fi].cells[i];
+      return { x: q.x + a * (p.x - q.x), y: q.y + a * (p.y - q.y) };
+    }),
+  }));
+  return { faces, score: cube.score, stat: cubeStat(faces), miss: 0, reject: 0 };
 }
 
 // Update the status bar only when the text changes (avoids per-frame DOM churn).
