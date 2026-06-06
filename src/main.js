@@ -4,6 +4,7 @@ import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
 import { drawGuide, drawCornerGuide, drawMove } from './overlay.js';
 import { glyphSVG } from './glyph.js';
+import { loadOpenCV } from './opencv.js';
 
 // Per-capture UI copy for the corner-on scan. Geometry lives in CORNER_CAPTURES;
 // hints name the held corner relative to the previous one (never left/right of a
@@ -306,3 +307,10 @@ els.perspective.addEventListener('input', () => {
 
 showButtons({ primary: 'Start camera' });
 requestAnimationFrame(render);
+
+// Warm up OpenCV.js in the background once the first frame has painted, so the
+// ~10 MB WASM is ready by the time the user starts scanning but never blocks the
+// initial render. Fire-and-forget; detection code awaits loadOpenCV() again.
+requestAnimationFrame(() => requestAnimationFrame(() => {
+  loadOpenCV().then(() => console.info('OpenCV.js ready')).catch((e) => console.warn('OpenCV.js load failed', e));
+}));
