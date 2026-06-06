@@ -12,8 +12,7 @@ import { findFaceGrids, fitFaceGrid } from './group.js';
 // Detection runs in a worker; this is pure visualization, not wired into the
 // scan state machine yet.
 const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
-const detectState = { frame: 0, lastStatus: '', heldFits: [], miss: 0 };
-const FIT_HOLD = 8; // frames to keep showing the last fitted faces through a dropout
+const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, smoothed: [] };
 // Every query param besides `detect` overrides a DETECT_DEFAULTS knob, so detection
 // can be tuned live from the URL without a rebuild, e.g.
 //   ?detect&method=adaptive&blockSize=51&C=7   or   ?detect&cannyLo=20&minFill=0.4
@@ -25,6 +24,12 @@ const detectOpts = (() => {
   }
   return o;
 })();
+// Temporal smoothing of the fitted faces (overridable via the URL detectOpts).
+const SMOOTH = {
+  alpha: detectOpts.smoothAlpha ?? 0.35, // EMA weight toward each new fit (lower = smoother)
+  assoc: detectOpts.assocFrac ?? 0.6,    // match to the previous frame within this * face size
+  maxMiss: detectOpts.maxMiss ?? 6,      // keep a face this many updates after it drops out
+};
 if (DEBUG_DETECT) console.log('[detect] debug overlay ON; opts =', detectOpts,
   '— start the camera. Click the preview (or press "c") to download the current frame as test data.');
 
@@ -117,28 +122,69 @@ function requestDetectFrame() {
   }
 }
 
-// Overlay whatever quads the worker last returned (drawn after the guide so they
-// sit on top). Count goes to the status bar, never the canvas (mirrored text reads
-// backwards).
+// On each fresh detection result, group -> fit -> temporally smooth; draw the
+// smoothed faces every frame. Count goes to the status bar, never the canvas
+// (mirrored text reads backwards).
 function drawDetectResults() {
   if (!cvReady()) { setDetectStatus('detect: loading OpenCV…'); return; }
   const quads = latestQuads();
-  const faces = findFaceGrids(quads, detectOpts);
-  let fits = faces.map(fitFaceGrid).filter(Boolean);
-
-  // Hold the last fitted faces through brief dropouts so the overlay doesn't blink.
-  if (fits.length) { detectState.heldFits = fits; detectState.miss = 0; }
-  else if (detectState.miss < FIT_HOLD) { detectState.miss++; fits = detectState.heldFits; }
-  else { detectState.heldFits = []; }
-
+  if (quads !== detectState.lastQuads) { // recompute only when the worker returns new quads
+    detectState.lastQuads = quads;
+    detectState.quadCount = quads.length;
+    const faces = findFaceGrids(quads, detectOpts);
+    smoothFits(faces.map((f) => fitFaceGrid(f, detectOpts)).filter(Boolean));
+  }
   drawDetections(ctx, quads);
-  drawFittedFaces(ctx, fits);
+  drawFittedFaces(ctx, detectState.smoothed);
 
-  const seen = fits.reduce((n, f) => n + f.cells.filter((c) => c.detected).length, 0);
-  const filled = fits.reduce((n, f) => n + f.cells.filter((c) => !c.detected).length, 0);
+  const seen = detectState.smoothed.reduce((n, f) => n + f.cells.filter((c) => c.detected).length, 0);
   setDetectStatus(
-    `detect[${detectOpts.method || 'canny'}]: <b>${quads.length}</b> quads · ` +
-    `<b>${fits.length}</b> face(s) · ${seen} seen + ${filled} filled`);
+    `detect[${detectOpts.method || 'canny'}]: <b>${detectState.quadCount}</b> quads · ` +
+    `<b>${detectState.smoothed.length}</b> face(s) · ${seen} seen`);
+}
+
+const centroidOf = (pts) => {
+  let x = 0, y = 0;
+  for (const p of pts) { x += p.x; y += p.y; }
+  return { x: x / pts.length, y: y / pts.length };
+};
+
+// EMA-smooth a fresh set of fits against detectState.smoothed: associate each to
+// the nearest previous face by centroid (canonical cell order makes the point-wise
+// EMA valid), ease matched faces toward the new fit, and hold unmatched previous
+// faces for a few updates so brief dropouts don't blink.
+function smoothFits(fits) {
+  const prev = detectState.smoothed;
+  const used = new Array(prev.length).fill(false);
+  const a = SMOOTH.alpha;
+  const lerp = (p, q) => ({ ...q, x: p.x + a * (q.x - p.x), y: p.y + a * (q.y - p.y) });
+  const next = [];
+  for (const fit of fits) {
+    const c = centroidOf(fit.cells);
+    const size = Math.hypot(fit.outline[2].x - fit.outline[0].x, fit.outline[2].y - fit.outline[0].y);
+    let bi = -1, bd = Infinity;
+    prev.forEach((s, i) => {
+      if (used[i]) return;
+      const sc = centroidOf(s.cells);
+      const d = Math.hypot(sc.x - c.x, sc.y - c.y);
+      if (d < bd) { bd = d; bi = i; }
+    });
+    if (bi >= 0 && bd < size * SMOOTH.assoc) {
+      used[bi] = true;
+      const s = prev[bi];
+      next.push({
+        cells: s.cells.map((p, i) => lerp(p, fit.cells[i])),
+        outline: s.outline.map((p, i) => lerp(p, fit.outline[i])),
+        miss: 0,
+      });
+    } else {
+      next.push({ cells: fit.cells.map((p) => ({ ...p })), outline: fit.outline.map((p) => ({ ...p })), miss: 0 });
+    }
+  }
+  for (let i = 0; i < prev.length; i++) {
+    if (!used[i] && prev[i].miss < SMOOTH.maxMiss) next.push({ ...prev[i], miss: prev[i].miss + 1 });
+  }
+  detectState.smoothed = next;
 }
 
 // Update the status bar only when the text changes (avoids per-frame DOM churn).
