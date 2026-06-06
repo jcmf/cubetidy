@@ -167,6 +167,38 @@ export function drawDetections(ctx, quads) {
   ctx.restore();
 }
 
+// Debug overlay for grouping: draw each recovered cube face's cells in a distinct
+// colour and connect adjacent grid cells, so the 3x3 lattices found among the
+// detected quads (and the rejection of clutter) are visible live. Geometry only.
+const FACE_COLORS = ['rgba(0,200,255,0.95)', 'rgba(255,90,200,0.95)', 'rgba(255,210,0,0.95)'];
+export function drawGrids(ctx, faces) {
+  ctx.save();
+  faces.forEach((face, fi) => {
+    const color = FACE_COLORS[fi % FACE_COLORS.length];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    for (const cell of face.cells) {
+      const q = cell.quad;
+      ctx.beginPath();
+      q.corners.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.closePath();
+      ctx.stroke();
+    }
+    // Connect each cell to its right/down grid neighbour to show the lattice.
+    const at = (r, c) => face.cells.find((x) => x.row === r && x.col === c)?.quad.center;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (const cell of face.cells) {
+      const a = cell.quad.center;
+      const right = at(cell.row, cell.col + 1), down = at(cell.row + 1, cell.col);
+      if (right) { ctx.moveTo(a.x, a.y); ctx.lineTo(right.x, right.y); }
+      if (down) { ctx.moveTo(a.x, a.y); ctx.lineTo(down.x, down.y); }
+    }
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
 // Draw the AR arrow for a single move on the front-facing grid.
 export function drawMove(ctx, region, token) {
   const { x, y, side, cell } = region;

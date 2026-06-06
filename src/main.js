@@ -2,9 +2,10 @@ import { startCamera } from './camera.js';
 import { computeRegion, computeCornerRegion, sampleCorner, CORNER_CAPTURES } from './detection.js';
 import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
-import { drawGuide, drawCornerGuide, drawMove, drawDetections } from './overlay.js';
+import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawGrids } from './overlay.js';
 import { glyphSVG } from './glyph.js';
 import { startCV, cvReady, requestDetect, latestQuads } from './opencv.js';
+import { findFaceGrids } from './group.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
@@ -119,8 +120,13 @@ function requestDetectFrame() {
 function drawDetectResults() {
   if (!cvReady()) { setDetectStatus('detect: loading OpenCV…'); return; }
   const quads = latestQuads();
-  setDetectStatus(`detect[${detectOpts.method || 'canny'}]: <b>${quads.length}</b> sticker quads`);
+  const faces = findFaceGrids(quads, detectOpts);
   drawDetections(ctx, quads);
+  drawGrids(ctx, faces);
+  const counts = faces.map((f) => f.cells.length).join(',');
+  setDetectStatus(
+    `detect[${detectOpts.method || 'canny'}]: <b>${quads.length}</b> quads · ` +
+    `<b>${faces.length}</b> face(s)${faces.length ? ` [${counts}]` : ''}`);
 }
 
 // Update the status bar only when the text changes (avoids per-frame DOM churn).
