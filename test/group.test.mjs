@@ -6,7 +6,7 @@
 //
 // Run: npm test
 
-import { findFaceGrids, fitFaceGrid } from '../src/group.js';
+import { findFaceGrids, fitFaceGrid, orientFace } from '../src/group.js';
 import { estimateIntrinsics, project } from '../src/pose.js';
 
 let pass = 0, fail = 0;
@@ -176,6 +176,22 @@ function labellingIsGridConsistent(cells) {
     row, col, quad: quad({ x: 200 + col * 50, y: 300 + row * 48 }, 'face', 1800),
   }));
   check('degenerate: a real 2x2 block still fits', fitFaceGrid({ cells: block }) !== null);
+})();
+
+// --- 7. orientFace canonicalizes the cell labelling -------------------------
+
+(() => {
+  // Axis-aligned geometry but deliberately flipped labels (col increases LEFT,
+  // rows swapped). orientFace should restore col->+x, row->+y.
+  const origin = { x: 100, y: 100 }, step = 40, cells = [];
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++)
+    cells.push({ row: 2 - r, col: 2 - c, quad: quad({ x: origin.x + c * step, y: origin.y + r * step }, 'face', 1200) });
+  const o = orientFace(cells);
+  const at = (r, c) => o.find((x) => x.row === r && x.col === c).quad.center;
+  let ok = true;
+  for (let r = 0; r < 3; r++) if (!(at(r, 0).x < at(r, 1).x && at(r, 1).x < at(r, 2).x)) ok = false;
+  for (let c = 0; c < 3; c++) if (!(at(0, c).y < at(1, c).y && at(1, c).y < at(2, c).y)) ok = false;
+  check('orientFace: canonicalizes col->+x, row->+y from a flipped labelling', ok);
 })();
 
 console.log(`\n${pass} passed, ${fail} failed`);

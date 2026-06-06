@@ -151,6 +151,32 @@ export function findFaceGrids(quads, opts = {}) {
   return faces;
 }
 
+// Relabel a face's cells to a canonical image orientation: column axis pointing
+// mostly +x, row axis mostly +y. Grouping's lattice basis is arbitrary (it can come
+// out transposed/flipped frame to frame), so without this the projected grid's
+// point order would flip between frames and break temporal smoothing.
+export function orientFace(cells) {
+  const at = (r, c) => cells.find((x) => x.row === r && x.col === c)?.quad.center;
+  let cx = 0, cy = 0, cn = 0, rx = 0, ry = 0, rn = 0;
+  for (const cell of cells) {
+    const a = cell.quad.center;
+    const right = at(cell.row, cell.col + 1); if (right) { cx += right.x - a.x; cy += right.y - a.y; cn++; }
+    const down = at(cell.row + 1, cell.col); if (down) { rx += down.x - a.x; ry += down.y - a.y; rn++; }
+  }
+  if (!cn || !rn) return cells; // not enough adjacency to judge orientation
+  let col = { x: cx / cn, y: cy / cn }, row = { x: rx / rn, y: ry / rn };
+  let transpose = false;
+  if (Math.abs(col.x) < Math.abs(row.x)) { transpose = true; [col, row] = [row, col]; }
+  const flipC = col.x < 0, flipR = row.y < 0;
+  return cells.map(({ row: r, col: c, quad }) => {
+    let nr = r, nc = c;
+    if (transpose) { const t = nr; nr = nc; nc = t; }
+    if (flipC) nc = 2 - nc;
+    if (flipR) nr = 2 - nr;
+    return { row: nr, col: nc, quad };
+  });
+}
+
 // Fit a homography from a face's labelled cells (grid (col,row) -> image) and
 // project the FULL 3x3, filling in the stickers detection missed. This is the
 // payoff of grouping: a partial, jittery detection becomes a complete face whose
@@ -159,7 +185,7 @@ export function findFaceGrids(quads, opts = {}) {
 // or null if the cells don't span a 2D grid (homography under-determined).
 export function fitFaceGrid(face, opts = {}) {
   const o = { minSpread: 0.05, ...opts };
-  const cells = face.cells;
+  const cells = orientFace(face.cells); // canonical labels -> stable projection order
   const cols = new Set(cells.map((c) => c.col)), rows = new Set(cells.map((c) => c.row));
   if (cells.length < 4 || cols.size < 2 || rows.size < 2) return null;
   // Near-collinear cells (a single detected row/line) make the homography
