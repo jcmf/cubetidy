@@ -7,7 +7,7 @@
 // Run: npm test
 
 import { estimateIntrinsics } from '../src/pose.js';
-import { projectCube, estimateCubePose } from '../src/cube-pose.js';
+import { projectCube, projectStickers, estimateCubePose } from '../src/cube-pose.js';
 import { findFaceGrids, fitFaceGrid } from '../src/group.js';
 
 let pass = 0, fail = 0;
@@ -20,10 +20,9 @@ const rotY = (a) => [[Math.cos(a), 0, Math.sin(a)], [0, 1, 0], [-Math.sin(a), 0,
 
 const K = estimateIntrinsics(1280, 720, 60);
 
-function quadAt(x, y, area) {
-  const s = Math.sqrt(area) / 2;
-  return { center: { x, y }, area, corners: [{ x: x - s, y: y - s }, { x: x + s, y: y - s }, { x: x + s, y: y + s }, { x: x - s, y: y + s }] };
-}
+const shoelace = (p) => Math.abs(p.reduce((s, a, i) => { const b = p[(i + 1) % p.length]; return s + a.x * b.y - b.x * a.y; }, 0)) / 2;
+// A realistic sticker quad: real projected centre + foreshortened corners.
+const quadFromSticker = (st) => ({ center: st.center, corners: st.corners, area: shoelace(st.corners) });
 
 // Build a corner-on truth cube, project its visible stickers to quads, recover.
 function runPose(yaw, pitch, C, label) {
@@ -31,11 +30,10 @@ function runPose(yaw, pitch, C, label) {
   const visible = projectCube(R, C, K);
   check(`${label}: corner-on shows 3 faces`, visible.length === 3, `got ${visible.length}`);
 
-  // Projected sticker centres -> quads sized to the local pitch.
-  const centers = visible.flatMap((f) => f.cells);
-  const nn = centers.map((p, i) => Math.min(...centers.filter((_, j) => j !== i).map((q) => Math.hypot(p.x - q.x, p.y - q.y))));
-  const pitchPx = [...nn].sort((a, b) => a - b)[nn.length >> 1];
-  const quads = centers.map((p) => quadAt(p.x, p.y, (pitchPx * 0.8) ** 2));
+  // Real projected stickers (centre + foreshortened corners) -> quads.
+  const stickers = projectStickers(R, C, K);
+  const centers = stickers.map((s) => s.center);
+  const quads = stickers.map(quadFromSticker);
 
   const fits = findFaceGrids(quads).map((f) => fitFaceGrid(f)).filter(Boolean);
   check(`${label}: groups at least one face`, fits.length >= 1, `got ${fits.length}`);
@@ -58,18 +56,18 @@ runPose(-0.7, 0.55, [-0.6, 0.3, 12], 'pose B');
 // same pose (the whole point — near-identical frames -> near-identical pose).
 (() => {
   const R = mul(rotY(0.6), rotX(0.6));
-  const centers = projectCube(R, [0.3, -0.1, 11], K).flatMap((f) => f.cells);
-  const nn = centers.map((p, i) => Math.min(...centers.filter((_, j) => j !== i).map((q) => Math.hypot(p.x - q.x, p.y - q.y))));
-  const pitchPx = [...nn].sort((a, b) => a - b)[nn.length >> 1];
+  const stickers0 = projectStickers(R, [0.3, -0.1, 11], K);
   const jitter = (seed) => { let s = seed; const r = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return (s / 0x7fffffff - 0.5) * 2; }; return r; };
 
   // What the user sees is the 2D overlay, so measure REPROJECTION spread (depth may
-  // wobble harmlessly). For each trial, the projected sticker positions; compare
-  // each trial's points to trial 0's by nearest match.
+  // wobble harmlessly). Each trial shifts every sticker rigidly by ±1px.
   const trials = [];
   for (let trial = 0; trial < 4; trial++) {
     const r = jitter(trial + 1);
-    const quads = centers.map((p) => quadAt(p.x + r(), p.y + r(), (pitchPx * 0.8) ** 2)); // +-1px noise
+    const quads = stickers0.map((st) => {
+      const ox = r(), oy = r();
+      return { center: { x: st.center.x + ox, y: st.center.y + oy }, corners: st.corners.map((c) => ({ x: c.x + ox, y: c.y + oy })), area: shoelace(st.corners) };
+    });
     const fits = findFaceGrids(quads).map((f) => fitFaceGrid(f)).filter(Boolean);
     const est = estimateCubePose(fits, K, quads);
     trials.push(est.faces.flatMap((f) => f.cells));
