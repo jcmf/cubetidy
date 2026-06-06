@@ -4,14 +4,14 @@ import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
 import { drawGuide, drawCornerGuide, drawMove, drawDetections } from './overlay.js';
 import { glyphSVG } from './glyph.js';
-import { loadOpenCV } from './opencv.js';
-import { detectStickerQuads } from './detect.js';
+import { startCV, cvReady, requestDetect, latestQuads } from './opencv.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
-// Not wired into the scan state machine yet — pure visualization.
+// Detection runs in a worker; this is pure visualization, not wired into the
+// scan state machine yet.
 const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
-const detectState = { cv: null, quads: [], frame: 0 };
+const detectState = { frame: 0, lastCount: -1 };
 
 // Per-capture UI copy for the corner-on scan. Geometry lives in CORNER_CAPTURES;
 // hints name the held corner relative to the previous one (never left/right of a
@@ -87,20 +87,20 @@ function render() {
   requestAnimationFrame(render);
 }
 
-// Re-run detection every few frames (it reads the whole frame), cache the quads,
-// and overlay them each frame. Count goes to the status bar, never the canvas.
+// Ship a frame to the detection worker every few frames (it reads the whole
+// frame), then overlay whatever quads it last returned. Count goes to the status
+// bar, never the canvas (mirrored text would read backwards).
 function runDetectOverlay() {
-  if (!detectState.cv) return;
-  if (detectState.frame++ % 4 === 0) {
-    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    try {
-      detectState.quads = detectStickerQuads(detectState.cv, img);
-      setStatus(`detect: <b>${detectState.quads.length}</b> sticker quads`);
-    } catch (e) {
-      console.warn('detect failed', e);
-    }
+  if (!cvReady()) return;
+  if (detectState.frame++ % 3 === 0) {
+    requestDetect(ctx.getImageData(0, 0, canvas.width, canvas.height));
   }
-  drawDetections(ctx, detectState.quads);
+  const quads = latestQuads();
+  if (quads.length !== detectState.lastCount) {
+    detectState.lastCount = quads.length;
+    setStatus(`detect: <b>${quads.length}</b> sticker quads`);
+  }
+  drawDetections(ctx, quads);
 }
 
 function drawSolved(region) {
@@ -333,11 +333,7 @@ els.perspective.addEventListener('input', () => {
 showButtons({ primary: 'Start camera' });
 requestAnimationFrame(render);
 
-// Warm up OpenCV.js in the background once the first frame has painted, so the
-// ~10 MB WASM is ready by the time the user starts scanning but never blocks the
-// initial render. Fire-and-forget; detection code awaits loadOpenCV() again.
-requestAnimationFrame(() => requestAnimationFrame(() => {
-  loadOpenCV()
-    .then((cv) => { detectState.cv = cv; console.info('OpenCV.js ready'); })
-    .catch((e) => console.warn('OpenCV.js load failed', e));
-}));
+// Spin up the OpenCV worker once the first frame has painted: the ~10 MB load
+// and WASM init happen off the main thread, so they're ready by scan time without
+// ever freezing the UI. No user action needed.
+requestAnimationFrame(() => requestAnimationFrame(() => startCV()));

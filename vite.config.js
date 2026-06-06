@@ -4,8 +4,10 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   server: { host: true },
   optimizeDeps: { include: ['cubejs'] },
-  // OpenCV.js (~10 MB) is code-split via a dynamic import in src/opencv.js, so it
-  // lands in its own chunk and never bloats the app bundle. Raise the size-warning
-  // limit so that expected, intentional chunk doesn't flag on every build.
+  // OpenCV runs in a Web Worker (src/cv-worker.js) that dynamically imports the
+  // ~10 MB module. Code-splitting inside a worker needs ES-module output (the
+  // default 'iife' can't split). The OpenCV chunk lands separately, so raise the
+  // size-warning limit so that expected, intentional chunk doesn't flag.
+  worker: { format: 'es' },
   build: { chunkSizeWarningLimit: 11000 },
 });
