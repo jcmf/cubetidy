@@ -2,17 +2,18 @@ import { startCamera } from './camera.js';
 import { computeRegion, computeCornerRegion, sampleCorner, CORNER_CAPTURES } from './detection.js';
 import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
-import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawGrids } from './overlay.js';
+import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawFittedFaces } from './overlay.js';
 import { glyphSVG } from './glyph.js';
 import { startCV, cvReady, requestDetect, latestQuads } from './opencv.js';
-import { findFaceGrids } from './group.js';
+import { findFaceGrids, fitFaceGrid } from './group.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
 // Detection runs in a worker; this is pure visualization, not wired into the
 // scan state machine yet.
 const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
-const detectState = { frame: 0, lastStatus: '' };
+const detectState = { frame: 0, lastStatus: '', heldFits: [], miss: 0 };
+const FIT_HOLD = 8; // frames to keep showing the last fitted faces through a dropout
 // Every query param besides `detect` overrides a DETECT_DEFAULTS knob, so detection
 // can be tuned live from the URL without a rebuild, e.g.
 //   ?detect&method=adaptive&blockSize=51&C=7   or   ?detect&cannyLo=20&minFill=0.4
@@ -86,7 +87,8 @@ function render() {
     // drawn onto the canvas, or the detector finds our own lines, not the cube.
     if (DEBUG_DETECT) requestDetectFrame();
 
-    if (state.phase === 'scanning') {
+    if (state.phase === 'scanning' && !DEBUG_DETECT) {
+      // The hold-the-cube guide just gets in the way of auto-detection.
       const scene = computeCornerRegion(canvas.width, canvas.height, state.persp, state.scanIndex);
       drawCornerGuide(ctx, scene, true);
     } else if (state.phase === 'guide') {
@@ -121,12 +123,21 @@ function drawDetectResults() {
   if (!cvReady()) { setDetectStatus('detect: loading OpenCV…'); return; }
   const quads = latestQuads();
   const faces = findFaceGrids(quads, detectOpts);
+  let fits = faces.map(fitFaceGrid).filter(Boolean);
+
+  // Hold the last fitted faces through brief dropouts so the overlay doesn't blink.
+  if (fits.length) { detectState.heldFits = fits; detectState.miss = 0; }
+  else if (detectState.miss < FIT_HOLD) { detectState.miss++; fits = detectState.heldFits; }
+  else { detectState.heldFits = []; }
+
   drawDetections(ctx, quads);
-  drawGrids(ctx, faces);
-  const counts = faces.map((f) => f.cells.length).join(',');
+  drawFittedFaces(ctx, fits);
+
+  const seen = fits.reduce((n, f) => n + f.cells.filter((c) => c.detected).length, 0);
+  const filled = fits.reduce((n, f) => n + f.cells.filter((c) => !c.detected).length, 0);
   setDetectStatus(
     `detect[${detectOpts.method || 'canny'}]: <b>${quads.length}</b> quads · ` +
-    `<b>${faces.length}</b> face(s)${faces.length ? ` [${counts}]` : ''}`);
+    `<b>${fits.length}</b> face(s) · ${seen} seen + ${filled} filled`);
 }
 
 // Update the status bar only when the text changes (avoids per-frame DOM churn).

@@ -199,6 +199,30 @@ export function drawGrids(ctx, faces) {
   ctx.restore();
 }
 
+// Draw fitted faces: the full 3x3 projected from each face's homography, so the
+// stickers detection missed are filled in. Outline per-face colour; each cell a
+// solid dot if it was actually detected, a hollow ring if projection-filled.
+export function drawFittedFaces(ctx, fits) {
+  ctx.save();
+  fits.forEach((fit, fi) => {
+    const color = FACE_COLORS[fi % FACE_COLORS.length];
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    fit.outline.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.closePath();
+    ctx.stroke();
+    for (const c of fit.cells) {
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
+      if (c.detected) ctx.fill();
+      else { ctx.lineWidth = 2; ctx.stroke(); }
+    }
+  });
+  ctx.restore();
+}
+
 // Draw the AR arrow for a single move on the front-facing grid.
 export function drawMove(ctx, region, token) {
   const { x, y, side, cell } = region;
