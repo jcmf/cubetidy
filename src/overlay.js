@@ -147,6 +147,26 @@ export function drawClassified(ctx, region, labels) {
   ctx.restore();
 }
 
+// Debug overlay for the auto-scan detector: outline each detected sticker quad
+// and dot its centre. Geometry only (no canvas text — it would read backwards
+// under the preview mirror); any counts/readouts belong in the HTML chrome.
+export function drawDetections(ctx, quads) {
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(0,240,140,0.95)';
+  ctx.fillStyle = 'rgba(0,240,140,0.95)';
+  for (const q of quads) {
+    ctx.beginPath();
+    q.corners.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.closePath();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(q.center.x, q.center.y, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 // Draw the AR arrow for a single move on the front-facing grid.
 export function drawMove(ctx, region, token) {
   const { x, y, side, cell } = region;

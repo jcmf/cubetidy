@@ -2,9 +2,16 @@ import { startCamera } from './camera.js';
 import { computeRegion, computeCornerRegion, sampleCorner, CORNER_CAPTURES } from './detection.js';
 import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
-import { drawGuide, drawCornerGuide, drawMove } from './overlay.js';
+import { drawGuide, drawCornerGuide, drawMove, drawDetections } from './overlay.js';
 import { glyphSVG } from './glyph.js';
 import { loadOpenCV } from './opencv.js';
+import { detectStickerQuads } from './detect.js';
+
+// Diagnostic harness for the OpenCV detector: open with ?detect to overlay
+// detected sticker quads on the live frame while tuning against a real cube.
+// Not wired into the scan state machine yet — pure visualization.
+const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
+const detectState = { cv: null, quads: [], frame: 0 };
 
 // Per-capture UI copy for the corner-on scan. Geometry lives in CORNER_CAPTURES;
 // hints name the held corner relative to the previous one (never left/right of a
@@ -74,8 +81,26 @@ function render() {
         drawSolved(region);
       }
     }
+
+    if (DEBUG_DETECT) runDetectOverlay();
   }
   requestAnimationFrame(render);
+}
+
+// Re-run detection every few frames (it reads the whole frame), cache the quads,
+// and overlay them each frame. Count goes to the status bar, never the canvas.
+function runDetectOverlay() {
+  if (!detectState.cv) return;
+  if (detectState.frame++ % 4 === 0) {
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    try {
+      detectState.quads = detectStickerQuads(detectState.cv, img);
+      setStatus(`detect: <b>${detectState.quads.length}</b> sticker quads`);
+    } catch (e) {
+      console.warn('detect failed', e);
+    }
+  }
+  drawDetections(ctx, detectState.quads);
 }
 
 function drawSolved(region) {
@@ -312,5 +337,7 @@ requestAnimationFrame(render);
 // ~10 MB WASM is ready by the time the user starts scanning but never blocks the
 // initial render. Fire-and-forget; detection code awaits loadOpenCV() again.
 requestAnimationFrame(() => requestAnimationFrame(() => {
-  loadOpenCV().then(() => console.info('OpenCV.js ready')).catch((e) => console.warn('OpenCV.js load failed', e));
+  loadOpenCV()
+    .then((cv) => { detectState.cv = cv; console.info('OpenCV.js ready'); })
+    .catch((e) => console.warn('OpenCV.js load failed', e));
 }));
