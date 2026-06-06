@@ -131,6 +131,14 @@ gaps / next steps:
   filtering background clutter and fitting the three vanishing directions / grid.
   This shares the worker harness with the quad detector — `cv-worker.js` dispatches
   on `opts.method`, returning `{type:'segments'}` for hough vs `{type:'quads'}`.
+- The `?detect` harness has an **on-page tuning panel** (`buildDetectPanel` in
+  `main.js`, `#detect-panel` styles) so the detector's knobs are sliders + a method
+  dropdown, not query-string edits. Sliders are schema-driven (`DETECT_PARAMS`,
+  method-filtered) and mutate `detectOpts` in place (the worker reads it every
+  frame); changes also `history.replaceState` back into the URL, so a copied link or
+  reload restores the tuning. A "Hide camera (lines only)" toggle blacks out the
+  frame *after* it's sampled for detection (so detection still sees the real cube).
+  To add a knob: add a `DETECT_PARAMS` row — no other wiring needed.
 - Classification is balanced k-means over all 54 samples (done). A possible next
   step is weighting each sticker by sampling confidence (patch variance / glare),
   since oblique corner-on faces vary in quality more than flat-on did.

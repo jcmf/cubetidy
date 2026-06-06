@@ -8,6 +8,7 @@ import { startCV, cvReady, requestDetect, latestQuads, latestSegments } from './
 import { findFaceGrids, fitFaceGrid } from './group.js';
 import { estimateCubePose } from './cube-pose.js';
 import { estimateIntrinsics } from './pose.js';
+import { DETECT_DEFAULTS, HOUGH_DEFAULTS } from './detect.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
@@ -26,6 +27,41 @@ const detectOpts = (() => {
   }
   return o;
 })();
+// Display-only state for the panel (not a worker knob). `hideCamera` blacks out the
+// frame so only the detection overlay shows; pulled out of detectOpts so it isn't
+// shipped to the worker, but it still round-trips through the URL like the rest.
+const detectDisplay = { hideCamera: false };
+if ('hideCamera' in detectOpts) { detectDisplay.hideCamera = !!detectOpts.hideCamera; delete detectOpts.hideCamera; }
+
+// Schema for the on-page tuning panel: every numeric detector knob with its slider
+// bounds and which method(s) it applies to (only the active method's knobs show).
+// Defaults come from DETECT_DEFAULTS / HOUGH_DEFAULTS; this just bounds the sliders.
+const currentMethod = () => detectOpts.method ?? 'canny';
+const DETECT_PARAMS = [
+  // shared by the canny line/quad preprocessing
+  { k: 'blur',        label: 'Blur (odd)',     min: 1,      max: 21,  step: 2,      methods: ['canny', 'hough'] },
+  { k: 'cannyLo',     label: 'Canny low',      min: 0,      max: 255, step: 1,      methods: ['canny', 'hough'] },
+  { k: 'cannyHi',     label: 'Canny high',     min: 0,      max: 300, step: 1,      methods: ['canny', 'hough'] },
+  // hough line explorer
+  { k: 'houghThresh', label: 'Hough votes',    min: 1,      max: 200, step: 1,      methods: ['hough'] },
+  { k: 'minLineLen',  label: 'Min line len',   min: 0,      max: 300, step: 1,      methods: ['hough'] },
+  { k: 'minLineFrac', label: 'Min line frac',  min: 0,      max: 0.3, step: 0.005,  methods: ['hough'] },
+  { k: 'maxLineGap',  label: 'Max line gap',   min: 0,      max: 50,  step: 1,      methods: ['hough'] },
+  // canny quad detector
+  { k: 'dilateIters', label: 'Dilate iters',   min: 0,      max: 5,   step: 1,      methods: ['canny'] },
+  { k: 'closeIters',  label: 'Close iters',    min: 0,      max: 5,   step: 1,      methods: ['canny'] },
+  // mask quad detector
+  { k: 'satThresh',   label: 'Sat threshold',  min: 0,      max: 255, step: 1,      methods: ['mask'] },
+  { k: 'valThresh',   label: 'Val threshold',  min: 0,      max: 255, step: 1,      methods: ['mask'] },
+  // shared quad gates
+  { k: 'approxEps',   label: 'Approx eps',     min: 0.01,   max: 0.2, step: 0.005,  methods: ['canny', 'mask'] },
+  { k: 'minAreaFrac', label: 'Min area frac',  min: 0.0001, max: 0.01, step: 0.0001, methods: ['canny', 'mask'] },
+  { k: 'maxAreaFrac', label: 'Max area frac',  min: 0.005,  max: 0.3, step: 0.005,  methods: ['canny', 'mask'] },
+  { k: 'minFill',     label: 'Min fill',       min: 0,      max: 1,   step: 0.01,   methods: ['canny', 'mask'] },
+  { k: 'maxAspect',   label: 'Max aspect',     min: 1,      max: 6,   step: 0.1,    methods: ['canny', 'mask'] },
+  { k: 'medianLo',    label: 'Median lo',      min: 0,      max: 1,   step: 0.01,   methods: ['canny', 'mask'] },
+  { k: 'medianHi',    label: 'Median hi',      min: 1,      max: 10,  step: 0.1,    methods: ['canny', 'mask'] },
+];
 // Temporal smoothing of the cube pose (overridable via the URL detectOpts).
 const SMOOTH = {
   alpha: detectOpts.smoothAlpha ?? 0.35, // EMA weight toward each new estimate (lower = smoother)
@@ -97,6 +133,13 @@ function render() {
     // Sample the CLEAN frame for detection here — before any guide/arrow overlay is
     // drawn onto the canvas, or the detector finds our own lines, not the cube.
     if (DEBUG_DETECT) requestDetectFrame();
+
+    // "Lines only" view: black out the frame AFTER it's been sampled for detection,
+    // so the detector still sees the real cube but the overlay draws on black.
+    if (DEBUG_DETECT && detectDisplay.hideCamera) {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
 
     if (state.phase === 'scanning' && !DEBUG_DETECT) {
       // The hold-the-cube guide just gets in the way of auto-detection.
@@ -453,6 +496,98 @@ if (DEBUG_DETECT) {
   canvas.addEventListener('click', captureFrame);
   window.addEventListener('keydown', (e) => { if (e.key === 'c') captureFrame(); });
   console.log('[capture] ready — use the "📷 Save frame" button (or click the image / press "c")');
+  buildDetectPanel();
+  // Suppress scan chrome that's irrelevant to (and overlaps) the tuning panel; the
+  // mirror toggle moves into the panel.
+  els.glyph.style.display = 'none';
+  els.mirror.style.display = 'none';
+}
+
+// Number of decimal places implied by a slider step (2 -> 0, 0.005 -> 3). A
+// function declaration (hoisted) so buildDetectPanel — called above, during module
+// eval — can use it regardless of source order.
+function stepDecimals(step) { const s = String(step); return s.includes('.') ? s.split('.')[1].length : 0; }
+
+// Reflect the live tuning back into the URL so a reload (or a copied link) restores
+// it — the on-page panel replaces editing the query string by hand, it doesn't
+// abandon it. Only touched/overridden knobs end up in the URL, keeping it compact.
+function syncDetectURL() {
+  const params = new URLSearchParams();
+  params.set('detect', '');
+  for (const [k, v] of Object.entries(detectOpts)) params.set(k, String(v));
+  if (detectDisplay.hideCamera) params.set('hideCamera', '1');
+  history.replaceState(null, '', location.pathname + '?' + params.toString());
+}
+
+// Build the on-page detector tuning panel (?detect only). A method <select>, the
+// Mirror / Hide-camera toggles, and a slider per numeric knob for the active
+// method. Sliders mutate detectOpts in place — the worker reads it every frame —
+// and mirror into the URL. Reset clears overrides back to the method's defaults.
+function buildDetectPanel() {
+  const panel = document.createElement('div');
+  panel.id = 'detect-panel';
+  panel.innerHTML = `
+    <h2>detect tuning</h2>
+    <div class="dp-row">
+      <label for="dp-method">Method</label>
+      <select id="dp-method">
+        <option value="canny">canny — quads</option>
+        <option value="mask">mask — quads</option>
+        <option value="hough">hough — lines</option>
+      </select>
+    </div>
+    <label class="dp-toggle"><input type="checkbox" id="dp-mirror"> Mirror preview</label>
+    <label class="dp-toggle"><input type="checkbox" id="dp-hide"> Hide camera (lines only)</label>
+    <div id="dp-sliders"></div>
+    <button id="dp-reset" type="button">Reset to defaults</button>`;
+  document.body.appendChild(panel);
+
+  const sliders = panel.querySelector('#dp-sliders');
+  function renderSliders() {
+    const method = currentMethod();
+    const base = method === 'hough' ? HOUGH_DEFAULTS : DETECT_DEFAULTS;
+    sliders.innerHTML = '';
+    for (const p of DETECT_PARAMS) {
+      if (!p.methods.includes(method)) continue;
+      const dec = stepDecimals(p.step);
+      const value = detectOpts[p.k] ?? base[p.k] ?? 0;
+      const row = document.createElement('div');
+      row.className = 'dp-slider';
+      row.innerHTML = `<label><span>${p.label}</span><span class="dp-val">${Number(value).toFixed(dec)}</span></label>`;
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = p.min; input.max = p.max; input.step = p.step; input.value = value;
+      const val = row.querySelector('.dp-val');
+      input.addEventListener('input', () => {
+        const v = parseFloat(input.value);
+        detectOpts[p.k] = v;
+        val.textContent = v.toFixed(dec);
+        syncDetectURL();
+      });
+      row.appendChild(input);
+      sliders.appendChild(row);
+    }
+  }
+
+  const method = panel.querySelector('#dp-method');
+  method.value = currentMethod();
+  method.addEventListener('change', () => { detectOpts.method = method.value; renderSliders(); syncDetectURL(); });
+
+  const mirror = panel.querySelector('#dp-mirror');
+  mirror.checked = canvas.classList.contains('mirrored');
+  mirror.addEventListener('change', () => canvas.classList.toggle('mirrored', mirror.checked));
+
+  const hide = panel.querySelector('#dp-hide');
+  hide.checked = detectDisplay.hideCamera;
+  hide.addEventListener('change', () => { detectDisplay.hideCamera = hide.checked; syncDetectURL(); });
+
+  panel.querySelector('#dp-reset').addEventListener('click', () => {
+    for (const p of DETECT_PARAMS) delete detectOpts[p.k];
+    renderSliders();
+    syncDetectURL();
+  });
+
+  renderSliders();
 }
 
 els.next.addEventListener('click', () => step(1));
