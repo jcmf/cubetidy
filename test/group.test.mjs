@@ -6,7 +6,7 @@
 //
 // Run: npm test
 
-import { findFaceGrids, fitFaceGrid, orientFace } from '../src/group.js';
+import { findFaceGrids, fitFaceGrid, orientFace, dedupeFaces } from '../src/group.js';
 import { estimateIntrinsics, project } from '../src/pose.js';
 
 let pass = 0, fail = 0;
@@ -159,6 +159,26 @@ function labellingIsGridConsistent(cells) {
   check('fit: every projected cell (incl. the 3 missing) lands on the true sticker', worst < 0.5, `worst=${worst.toFixed(3)}px`);
   check('fit: dropped cells flagged not-detected, kept flagged detected', fit.cells.every((c) =>
     c.detected === !dropped.has(`${c.row},${c.col}`)));
+  check('fit: clean face has near-zero reprojection error', fit.reproj < 2, `reproj=${fit?.reproj?.toFixed(2)}`);
+})();
+
+// --- 5b. dedupeFaces suppresses overlapping faces, keeps adjacent ones -------
+
+(() => {
+  const makeFit = (cx, cy, seen) => {
+    const cells = [];
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++)
+      cells.push({ row: r, col: c, x: cx + (c - 1) * 40, y: cy + (r - 1) * 40, detected: r * 3 + c < seen });
+    return { cells, outline: [{ x: cx - 60, y: cy - 60 }, { x: cx + 60, y: cy - 60 }, { x: cx + 60, y: cy + 60 }, { x: cx - 60, y: cy + 60 }], reproj: 1 };
+  };
+  // Two near-coincident fits (same face, found two ways): keep the stronger.
+  const overlap = dedupeFaces([makeFit(300, 300, 5), makeFit(308, 296, 8)]);
+  check('dedupe: collapses overlapping fits to one', overlap.length === 1);
+  check('dedupe: keeps the one with more detected cells',
+    overlap[0].cells.filter((c) => c.detected).length === 8);
+  // Two faces a full face-width apart (adjacent on a cube): keep both.
+  const adjacent = dedupeFaces([makeFit(300, 300, 9), makeFit(420, 300, 6)]);
+  check('dedupe: keeps genuinely adjacent faces', adjacent.length === 2);
 })();
 
 // --- 6. degenerate (near-collinear) cell sets are rejected ------------------

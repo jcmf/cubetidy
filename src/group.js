@@ -194,6 +194,16 @@ export function fitFaceGrid(face, opts = {}) {
   if (spread2D(cells.map((c) => c.quad.center)) < o.minSpread) return null;
 
   const H = homographyDLT(cells.map((c) => ({ X: [c.col, c.row], u: [c.quad.center.x, c.quad.center.y] })));
+  // Max reprojection error of the detected cells (info for dedupe tie-breaking).
+  // Not a rejection criterion: a 4-cell fit is exactly determined (0 error) and a
+  // real oblique face also fits a homography exactly, so it doesn't separate
+  // spurious from real — overlap (dedupeFaces) does that instead.
+  let reproj = 0;
+  for (const c of cells) {
+    const [x, y] = applyHomography(H, [c.col, c.row]);
+    reproj = Math.max(reproj, Math.hypot(x - c.quad.center.x, y - c.quad.center.y));
+  }
+
   const detected = new Set(cells.map((c) => `${c.row},${c.col}`));
   const projected = [];
   for (let r = 0; r < 3; r++) {
@@ -204,5 +214,31 @@ export function fitFaceGrid(face, opts = {}) {
   }
   const corner = (c, r) => { const [x, y] = applyHomography(H, [c, r]); return { x, y }; };
   const outline = [corner(-0.5, -0.5), corner(2.5, -0.5), corner(2.5, 2.5), corner(-0.5, 2.5)];
-  return { H, cells: projected, outline };
+  return { H, cells: projected, outline, reproj };
+}
+
+const faceCentroid = (fit) => {
+  let x = 0, y = 0;
+  for (const c of fit.cells) { x += c.x; y += c.y; }
+  return { x: x / fit.cells.length, y: y / fit.cells.length };
+};
+const faceSize = (fit) => Math.hypot(fit.outline[2].x - fit.outline[0].x, fit.outline[2].y - fit.outline[0].y);
+
+// Suppress spurious faces that overlap a stronger one. Real cube faces tile — they
+// meet at edges but don't overlap — so two fits with near-coincident centres are
+// the same face found two ways (the corner-on instability). Greedily keep the best
+// (most detected cells, then lowest reprojection error) and drop any later fit
+// whose centre falls within overlapFrac of a kept face's size.
+export function dedupeFaces(fits, opts = {}) {
+  const o = { overlapFrac: 0.5, ...opts };
+  const score = (f) => f.cells.filter((c) => c.detected).length;
+  const sorted = [...fits].sort((a, b) => score(b) - score(a) || a.reproj - b.reproj);
+  const kept = [];
+  for (const f of sorted) {
+    const c = faceCentroid(f), size = faceSize(f);
+    const clashes = kept.some((k) =>
+      dist(faceCentroid(k), c) < o.overlapFrac * Math.min(size, faceSize(k)));
+    if (!clashes) kept.push(f);
+  }
+  return kept;
 }

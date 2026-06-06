@@ -10,10 +10,11 @@
 // outlined in colour with solid (detected) / hollow (projection-filled) cells.
 
 import { Canvas, loadImage } from 'skia-canvas';
-import { basename } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import cv from '@techstark/opencv-js';
 import { detectStickerQuads } from '../src/detect.js';
-import { findFaceGrids, fitFaceGrid } from '../src/group.js';
+import { findFaceGrids, fitFaceGrid, dedupeFaces } from '../src/group.js';
 import { drawDetections, drawFittedFaces } from '../src/overlay.js';
 
 await new Promise((r) => { if (cv && cv.Mat) return r(); cv.onRuntimeInitialized = r; });
@@ -39,16 +40,32 @@ for (const p of paths) {
 
   const quads = detectStickerQuads(cv, imageData, opts);
   const faces = findFaceGrids(quads, opts);
-  const fits = faces.map((f) => fitFaceGrid(f, opts)).filter(Boolean);
+  const fits = dedupeFaces(faces.map((f) => fitFaceGrid(f, opts)).filter(Boolean), opts);
 
   drawDetections(ctx, quads);
   drawFittedFaces(ctx, fits);
-  const out = p.replace(/\.(png|jpe?g|webp)$/i, '') + '.det.png';
-  await canvas.saveAs(out);
 
-  const perFace = fits.map((f) => f.cells.filter((c) => c.detected).length).join('/');
-  console.log(`${basename(p)} ${img.width}x${img.height} | method=${opts.method || 'canny'} | ` +
-    `${quads.length} quads | ${faces.length} grids | ${fits.length} faces${fits.length ? ` (cells seen: ${perFace})` : ''} -> ${out}`);
+  const outDir = join(dirname(p), 'annotated');
+  mkdirSync(outDir, { recursive: true });
+  const base = basename(p).replace(/\.(png|jpe?g|webp)$/i, '');
+  await canvas.saveAs(join(outDir, base + '.png'));
+
+  // Zoomed crop around everything detected — the cube is usually small in frame.
+  const pts = [...quads.flatMap((q) => q.corners), ...fits.flatMap((f) => f.outline)];
+  if (pts.length) {
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y), pad = 40;
+    const x0 = Math.max(0, Math.min(...xs) - pad), y0 = Math.max(0, Math.min(...ys) - pad);
+    const x1 = Math.min(img.width, Math.max(...xs) + pad), y1 = Math.min(img.height, Math.max(...ys) + pad);
+    const cw = x1 - x0, ch = y1 - y0, scale = Math.min(3, 720 / Math.max(cw, ch));
+    const zc = new Canvas(Math.round(cw * scale), Math.round(ch * scale));
+    const zx = zc.getContext('2d');
+    zx.drawImage(canvas, x0, y0, cw, ch, 0, 0, zc.width, zc.height);
+    await zc.saveAs(join(outDir, base + '.zoom.png'));
+  }
+
+  const perFace = fits.map((f) => `${f.cells.filter((c) => c.detected).length}cells/reproj${f.reproj.toFixed(1)}px`).join(' , ');
+  console.log(`${base} ${img.width}x${img.height} | method=${opts.method || 'canny'} | ` +
+    `${quads.length} quads | ${faces.length} grids | ${fits.length} faces${fits.length ? ` (cells seen: ${perFace})` : ''} -> annotated/${base}.png`);
  } catch (err) {
   console.error(`${basename(p)}: FAILED — ${err.message || err}`);
  }

@@ -5,7 +5,7 @@ import { initSolver, solve } from './solver.js';
 import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawFittedFaces } from './overlay.js';
 import { glyphSVG } from './glyph.js';
 import { startCV, cvReady, requestDetect, latestQuads } from './opencv.js';
-import { findFaceGrids, fitFaceGrid } from './group.js';
+import { findFaceGrids, fitFaceGrid, dedupeFaces } from './group.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
@@ -132,7 +132,8 @@ function drawDetectResults() {
     detectState.lastQuads = quads;
     detectState.quadCount = quads.length;
     const faces = findFaceGrids(quads, detectOpts);
-    smoothFits(faces.map((f) => fitFaceGrid(f, detectOpts)).filter(Boolean));
+    const fits = dedupeFaces(faces.map((f) => fitFaceGrid(f, detectOpts)).filter(Boolean), detectOpts);
+    smoothFits(fits);
   }
   drawDetections(ctx, quads);
   drawFittedFaces(ctx, detectState.smoothed);
