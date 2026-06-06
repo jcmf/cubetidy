@@ -29,6 +29,8 @@ export const DETECT_DEFAULTS = {
                         //   from 1 detected face to 2 on the sample frames)
   dilateIters: 1,       // dilate edges to close gaps into loops (1: avoid merging
                         //   adjacent stickers into one blob)
+  closeIters: 1,        // morphological close to bridge broken edges into closed
+                        //   sticker loops (helps dim/oblique faces; 0 = off)
 
   // mask method (HSV; OpenCV ranges S,V in 0..255)
   satThresh: 60,        // S above this => a coloured sticker
@@ -82,6 +84,7 @@ export function detectStickerQuads(cv, imageData, opts = {}) {
       cv.GaussianBlur(work, work, new cv.Size(o.blur | 1, o.blur | 1), 0);
       cv.Canny(work, bin, o.cannyLo, o.cannyHi);
       cv.dilate(bin, bin, kernel, new cv.Point(-1, -1), o.dilateIters);
+      if (o.closeIters > 0) cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kernel, new cv.Point(-1, -1), o.closeIters);
       retr = cv.RETR_LIST;
     }
 
