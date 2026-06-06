@@ -13,11 +13,13 @@ await new Promise((res) => {
   cv.onRuntimeInitialized = res;
 });
 
-// Build a fake frame: gray background with a 3x3 grid of separated solid squares.
+// Build a fake frame resembling a cube face: bright stickers on a dark body/grid,
+// so both methods ('canny' edges and 'adaptive' bright-vs-dark) have something to
+// find. (This is an API/pipeline smoke test, not a realism test.)
 const W = 480, H = 480;
 const data = new Uint8ClampedArray(W * H * 4);
 for (let i = 0; i < W * H; i++) {
-  data[i * 4] = 150; data[i * 4 + 1] = 150; data[i * 4 + 2] = 150; data[i * 4 + 3] = 255;
+  data[i * 4] = 24; data[i * 4 + 1] = 24; data[i * 4 + 2] = 24; data[i * 4 + 3] = 255;
 }
 const fillRect = (x0, y0, w, h, [r, g, b]) => {
   for (let y = y0; y < y0 + h; y++)
@@ -42,18 +44,21 @@ const check = (name, cond, extra = '') => {
   console.log((cond ? '  ok  ' : 'FAIL  ') + name + (cond ? '' : `  ${extra}`));
 };
 
-const quads = detectStickerQuads(cv, imageData);
-check('returns an array', Array.isArray(quads));
-check('finds the 9 squares (>=9 quads)', quads.length >= 9, `got ${quads.length}`);
-check('every quad has 4 corners + a center', quads.every((q) =>
-  q.corners?.length === 4 && Number.isFinite(q.center?.x) && Number.isFinite(q.center?.y)));
-check('quad centers land inside the frame', quads.every((q) =>
-  q.center.x >= 0 && q.center.x < W && q.center.y >= 0 && q.center.y < H));
+for (const method of ['canny', 'mask']) {
+  const quads = detectStickerQuads(cv, imageData, { method });
+  check(`[${method}] returns an array`, Array.isArray(quads));
+  check(`[${method}] finds the 9 squares (>=9 quads)`, quads.length >= 9, `got ${quads.length}`);
+  check(`[${method}] every quad has 4 corners + a center`, quads.every((q) =>
+    q.corners?.length === 4 && Number.isFinite(q.center?.x) && Number.isFinite(q.center?.y)));
+  check(`[${method}] quad centers land inside the frame`, quads.every((q) =>
+    q.center.x >= 0 && q.center.x < W && q.center.y >= 0 && q.center.y < H));
 
-// Run a few more times to surface any Mat leak/double-free crash.
-let crashed = false;
-try { for (let i = 0; i < 10; i++) detectStickerQuads(cv, imageData); } catch (e) { crashed = true; console.log(e); }
-check('repeated calls do not crash (memory handling)', !crashed);
+  // Run a few more times to surface any Mat leak/double-free crash.
+  let crashed = false;
+  try { for (let i = 0; i < 10; i++) detectStickerQuads(cv, imageData, { method }); } catch (e) { crashed = true; console.log(e); }
+  check(`[${method}] repeated calls do not crash (memory handling)`, !crashed);
+  console.log(`  -> [${method}] detected ${quads.length} quads`);
+}
 
-console.log(`\n${fail ? 'FAILED' : 'OK'} — ${fail} failure(s); detected ${quads.length} quads`);
+console.log(`\n${fail ? 'FAILED' : 'OK'} — ${fail} failure(s)`);
 process.exit(fail ? 1 : 0);

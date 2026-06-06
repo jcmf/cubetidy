@@ -12,7 +12,18 @@ import { startCV, cvReady, requestDetect, latestQuads } from './opencv.js';
 // scan state machine yet.
 const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
 const detectState = { frame: 0, lastStatus: '' };
-if (DEBUG_DETECT) console.log('[detect] debug overlay ON — start the camera; outlines appear once the OpenCV worker is ready');
+// Every query param besides `detect` overrides a DETECT_DEFAULTS knob, so detection
+// can be tuned live from the URL without a rebuild, e.g.
+//   ?detect&method=adaptive&blockSize=51&C=7   or   ?detect&cannyLo=20&minFill=0.4
+const detectOpts = (() => {
+  const o = {};
+  for (const [k, v] of new URLSearchParams(location.search)) {
+    if (k === 'detect') continue;
+    o[k] = /^-?\d*\.?\d+$/.test(v) ? parseFloat(v) : v;
+  }
+  return o;
+})();
+if (DEBUG_DETECT) console.log('[detect] debug overlay ON; opts =', detectOpts, '— start the camera; outlines appear once OpenCV is ready');
 
 // Per-capture UI copy for the corner-on scan. Geometry lives in CORNER_CAPTURES;
 // hints name the held corner relative to the previous one (never left/right of a
@@ -98,7 +109,7 @@ function render() {
 function requestDetectFrame() {
   if (!cvReady()) return;
   if (detectState.frame++ % 3 === 0) {
-    requestDetect(ctx.getImageData(0, 0, canvas.width, canvas.height));
+    requestDetect(ctx.getImageData(0, 0, canvas.width, canvas.height), detectOpts);
   }
 }
 
@@ -108,7 +119,7 @@ function requestDetectFrame() {
 function drawDetectResults() {
   if (!cvReady()) { setDetectStatus('detect: loading OpenCV…'); return; }
   const quads = latestQuads();
-  setDetectStatus(`detect: <b>${quads.length}</b> sticker quads`);
+  setDetectStatus(`detect[${detectOpts.method || 'canny'}]: <b>${quads.length}</b> sticker quads`);
   drawDetections(ctx, quads);
 }
 

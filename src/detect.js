@@ -5,24 +5,45 @@
 // it node's cv (see tools/detect-smoke.mjs).
 //
 // Stage 1 (here): find candidate sticker quadrilaterals in a frame — convex,
-// roughly-square contours of plausible size. Stage 2 (grouping the quads into the
-// three faces of a corner-on view and solving a single 6-DoF cube pose) builds on
-// this once stage 1 is confirmed against a real cube.
+// roughly-square contours of plausible size. Two preprocessing methods:
+//   'canny'  edge detection (good on high-contrast borders, weaker on cubes)
+//   'mask'   HSV sticker mask: a sticker is SATURATED (the six colours) OR BRIGHT
+//            (the white face), while the black grid/body is neither — so
+//            (S > satThresh) OR (V > valThresh) isolates stickers from the grid and
+//            from most backgrounds, and holds up for oblique faces. (Brightness
+//            alone won't do: red and blue stickers are dark; white is desaturated.)
+// Stage 2 (grouping the quads into the three faces of a corner-on view and solving
+// a single 6-DoF cube pose) builds on this once stage 1 is dialled in on a cube.
 //
-// All OpenCV Mats are explicitly deleted: this runs in the render loop, and the
-// Emscripten heap is not garbage-collected.
+// Every value here is overridable per-call (opts), so the ?detect harness can tune
+// it live from the URL. All OpenCV Mats are explicitly deleted: this runs in the
+// worker per frame and the Emscripten heap is not garbage-collected.
 
 export const DETECT_DEFAULTS = {
-  blur: 5,             // Gaussian blur kernel (odd); tames sensor noise pre-edges
-  cannyLo: 40,         // Canny hysteresis thresholds
-  cannyHi: 120,
-  dilateIters: 2,      // dilate edges to close gaps so sticker borders form loops
-  approxEps: 0.08,     // approxPolyDP tolerance as a fraction of contour perimeter
-  minAreaFrac: 0.0008, // reject quads smaller than this fraction of the frame
-  maxAreaFrac: 0.05,   // ...or larger (a whole face/background panel)
-  minFill: 0.55,       // contourArea / min-area-rect area: rejects slivers
-  maxAspect: 2.2,      // max side ratio of the bounding rotated rect
-  medianBand: [0.35, 2.8], // keep quads whose area is within this band of the median
+  method: 'canny',      // 'canny' | 'mask'
+  blur: 5,              // Gaussian blur kernel (odd); tames sensor noise
+
+  // canny method
+  cannyLo: 30,          // Canny hysteresis thresholds (lowered to catch sticker
+  cannyHi: 90,          //   borders, which are weaker than typical clutter edges)
+  dilateIters: 1,       // dilate edges to close gaps into loops (1: avoid merging
+                        //   adjacent stickers into one blob)
+
+  // mask method (HSV; OpenCV ranges S,V in 0..255)
+  satThresh: 60,        // S above this => a coloured sticker
+  valThresh: 150,       // ...or V above this => a bright (white) sticker
+
+  // shared quad gates
+  approxEps: 0.08,      // approxPolyDP tolerance as a fraction of perimeter
+  minAreaFrac: 0.0006,  // reject quads smaller than this fraction of the frame
+  maxAreaFrac: 0.06,    // ...or larger (a whole face / background panel)
+  minFill: 0.45,        // contourArea / min-area-rect area (lowered: sheared
+                        //   oblique stickers don't fill their bounding rect)
+  maxAspect: 3.0,       // max side ratio of the bounding rect (raised: foreshortened
+                        //   far-face stickers are elongated)
+  medianLo: 0.15,       // keep quads within [lo,hi]x the median area. Wide, because
+  medianHi: 5.0,        //   corner-on perspective makes near/far stickers very
+                        //   different sizes; a tight band culled the far face.
 };
 
 // Find candidate sticker quads in an ImageData. Returns an array of
@@ -32,20 +53,38 @@ export function detectStickerQuads(cv, imageData, opts = {}) {
   const frameArea = imageData.width * imageData.height;
 
   const src = cv.matFromImageData(imageData);
-  const gray = new cv.Mat();
-  const edges = new cv.Mat();
+  const work = new cv.Mat();    // gray (canny) or HSV (mask)
+  const bin = new cv.Mat();     // binary image fed to findContours
+  const tmp = new cv.Mat();     // scratch for the mask method
   const contours = new cv.MatVector();
   const hierarchy = new cv.Mat();
   const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+  const chans = new cv.MatVector(); // HSV planes for the mask method
 
   const quads = [];
   try {
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, gray, new cv.Size(o.blur, o.blur), 0);
-    cv.Canny(gray, edges, o.cannyLo, o.cannyHi);
-    cv.dilate(edges, edges, kernel, new cv.Point(-1, -1), o.dilateIters);
-    cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+    let retr;
+    if (o.method === 'mask') {
+      // sticker mask = (S > satThresh) OR (V > valThresh); the black grid is neither.
+      cv.cvtColor(src, work, cv.COLOR_RGBA2RGB);
+      cv.cvtColor(work, work, cv.COLOR_RGB2HSV);
+      cv.split(work, chans);                       // H, S, V planes
+      const S = chans.get(1), V = chans.get(2);
+      cv.threshold(S, bin, o.satThresh, 255, cv.THRESH_BINARY);
+      cv.threshold(V, tmp, o.valThresh, 255, cv.THRESH_BINARY);
+      cv.bitwise_or(bin, tmp, bin);
+      S.delete(); V.delete();
+      cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kernel); // clean speckle + thin bridges
+      retr = cv.RETR_EXTERNAL;
+    } else {
+      cv.cvtColor(src, work, cv.COLOR_RGBA2GRAY);
+      cv.GaussianBlur(work, work, new cv.Size(o.blur | 1, o.blur | 1), 0);
+      cv.Canny(work, bin, o.cannyLo, o.cannyHi);
+      cv.dilate(bin, bin, kernel, new cv.Point(-1, -1), o.dilateIters);
+      retr = cv.RETR_LIST;
+    }
 
+    cv.findContours(bin, contours, hierarchy, retr, cv.CHAIN_APPROX_SIMPLE);
     for (let i = 0; i < contours.size(); i++) {
       const c = contours.get(i);
       const quad = quadFromContour(cv, c, o, frameArea);
@@ -53,11 +92,11 @@ export function detectStickerQuads(cv, imageData, opts = {}) {
       c.delete();
     }
   } finally {
-    src.delete(); gray.delete(); edges.delete();
-    contours.delete(); hierarchy.delete(); kernel.delete();
+    src.delete(); work.delete(); bin.delete(); tmp.delete();
+    contours.delete(); hierarchy.delete(); kernel.delete(); chans.delete();
   }
 
-  return filterByMedianArea(quads, o.medianBand);
+  return filterByMedianArea(quads, o.medianLo, o.medianHi);
 }
 
 // Approve one contour as a sticker quad, or return null. Owns no Mat beyond a
@@ -95,7 +134,7 @@ function quadFromContour(cv, contour, o, frameArea) {
 
 // Stickers on one cube are similar in apparent size; drop outliers far from the
 // median area, which are usually background clutter that happened to be square.
-function filterByMedianArea(quads, [lo, hi]) {
+function filterByMedianArea(quads, lo, hi) {
   if (quads.length < 3) return quads;
   const areas = quads.map((q) => q.area).sort((a, b) => a - b);
   const median = areas[areas.length >> 1];
