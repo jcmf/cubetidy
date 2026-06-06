@@ -49,6 +49,55 @@ export const DETECT_DEFAULTS = {
                         //   different sizes; a tight band culled the far face.
 };
 
+// Defaults for the Canny + probabilistic-Hough line-segment explorer
+// (detectLineSegments). Separate from DETECT_DEFAULTS so the two paths can be
+// tuned independently, but the shared blur/Canny names mean ?detect URL knobs
+// (cannyLo/cannyHi/blur) carry over between method=canny and method=hough.
+export const HOUGH_DEFAULTS = {
+  blur: 5,            // Gaussian blur kernel (odd); tames sensor noise before Canny
+  cannyLo: 40,        // Canny hysteresis thresholds. Higher than the quad detector's
+  cannyHi: 120,       //   (20/50): for lines we want clean strong edges, not closed
+                      //   loops, so weak speckle that HoughLinesP would vote on is OK
+                      //   to drop.
+  houghThresh: 50,    // min accumulator votes for a line (≈ pixels along it)
+  minLineLen: 40,     // reject segments shorter than this (px). Tuned for ~720p; pass
+                      //   minLineFrac to scale with frame size instead.
+  minLineFrac: 0,     // if > 0, minLineLen = minLineFrac * min(width,height)
+  maxLineGap: 10,     // bridge gaps up to this (px) into one segment
+};
+
+// Canny + probabilistic Hough (HoughLinesP) line-segment explorer. Returns an
+// array of { x1, y1, x2, y2 } segments in canvas pixel coordinates. Visualization
+// aid for sizing up a line-based detector — not (yet) wired into the scan. Same
+// contract as detectStickerQuads: cv injected, DOM-free, every Mat freed.
+export function detectLineSegments(cv, imageData, opts = {}) {
+  const o = { ...HOUGH_DEFAULTS, ...opts };
+  const minLen = o.minLineFrac > 0
+    ? o.minLineFrac * Math.min(imageData.width, imageData.height)
+    : o.minLineLen;
+
+  const src = cv.matFromImageData(imageData);
+  const gray = new cv.Mat();
+  const edges = new cv.Mat();
+  const lines = new cv.Mat();
+
+  const segments = [];
+  try {
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, gray, new cv.Size(o.blur | 1, o.blur | 1), 0);
+    cv.Canny(gray, edges, o.cannyLo, o.cannyHi);
+    // rho=1px, theta=1°; HoughLinesP fills `lines` with [x1,y1,x2,y2] rows (CV_32S).
+    cv.HoughLinesP(edges, lines, 1, Math.PI / 180, o.houghThresh, minLen, o.maxLineGap);
+    for (let i = 0; i < lines.rows; i++) {
+      const d = lines.data32S;
+      segments.push({ x1: d[i * 4], y1: d[i * 4 + 1], x2: d[i * 4 + 2], y2: d[i * 4 + 3] });
+    }
+  } finally {
+    src.delete(); gray.delete(); edges.delete(); lines.delete();
+  }
+  return segments;
+}
+
 // Find candidate sticker quads in an ImageData. Returns an array of
 // { corners: [{x,y}*4], center: {x,y}, area } in canvas pixel coordinates.
 export function detectStickerQuads(cv, imageData, opts = {}) {

@@ -16,7 +16,7 @@
 //
 // detect.js is cv-injected and DOM-free, so it runs here unchanged.
 
-import { detectStickerQuads } from './detect.js';
+import { detectStickerQuads, detectLineSegments } from './detect.js';
 import cvModule from '@techstark/opencv-js';
 
 const cv = cvModule?.default ?? cvModule; // tolerate either interop shape
@@ -37,11 +37,16 @@ self.onmessage = (e) => {
   if (!ready) { postMessage({ type: 'quads', quads: [] }); return; }
   // The frame's pixel buffer was transferred in; rebuild an ImageData-like object.
   const imageData = { width: msg.width, height: msg.height, data: new Uint8ClampedArray(msg.buffer) };
-  let quads = [];
   try {
-    quads = detectStickerQuads(cv, imageData, msg.opts);
+    // method=hough is the Canny + probabilistic-Hough line explorer; it returns
+    // line segments instead of sticker quads. Everything else is the quad detector.
+    if (msg.opts && msg.opts.method === 'hough') {
+      postMessage({ type: 'segments', segments: detectLineSegments(cv, imageData, msg.opts) });
+    } else {
+      postMessage({ type: 'quads', quads: detectStickerQuads(cv, imageData, msg.opts) });
+    }
   } catch (err) {
+    // Report and clear the in-flight slot so the main thread keeps requesting.
     postMessage({ type: 'error', message: String(err) });
   }
-  postMessage({ type: 'quads', quads });
 };

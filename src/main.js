@@ -2,9 +2,9 @@ import { startCamera } from './camera.js';
 import { computeRegion, computeCornerRegion, sampleCorner, CORNER_CAPTURES } from './detection.js';
 import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
-import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawCube } from './overlay.js';
+import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawCube, drawSegments } from './overlay.js';
 import { glyphSVG } from './glyph.js';
-import { startCV, cvReady, requestDetect, latestQuads } from './opencv.js';
+import { startCV, cvReady, requestDetect, latestQuads, latestSegments } from './opencv.js';
 import { findFaceGrids, fitFaceGrid } from './group.js';
 import { estimateCubePose } from './cube-pose.js';
 import { estimateIntrinsics } from './pose.js';
@@ -132,6 +132,16 @@ function requestDetectFrame() {
 // (mirrored text reads backwards).
 function drawDetectResults() {
   if (!cvReady()) { setDetectStatus('detect: loading OpenCV…'); return; }
+
+  // method=hough: the Canny + probabilistic-Hough line explorer. Pure
+  // visualization of raw segments — no grouping/pose, just draw what Hough found.
+  if (detectOpts.method === 'hough') {
+    const segments = latestSegments();
+    drawSegments(ctx, segments);
+    setDetectStatus(`detect[hough]: <b>${segments.length}</b> line segments`);
+    return;
+  }
+
   const quads = latestQuads();
   if (quads !== detectState.lastQuads) { // recompute only when the worker returns new quads
     detectState.lastQuads = quads;

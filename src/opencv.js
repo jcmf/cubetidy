@@ -10,6 +10,7 @@ let worker = null;
 let ready = false;
 let inFlight = false;
 let latest = [];
+let latestSeg = [];
 
 export function startCV() {
   if (worker) return;
@@ -24,6 +25,10 @@ export function startCV() {
       inFlight = false;
       if (!latest.length && msg.quads.length) console.log('[cv] first detection:', msg.quads.length, 'quads');
       latest = msg.quads;
+    } else if (msg.type === 'segments') {
+      inFlight = false;
+      if (!latestSeg.length && msg.segments.length) console.log('[cv] first detection:', msg.segments.length, 'line segments');
+      latestSeg = msg.segments;
     } else if (msg.type === 'error') { inFlight = false; console.warn('[cv] worker error:', msg.message); }
   };
   worker.onerror = (e) => console.warn('[cv] worker onerror', e.message || e);
@@ -46,3 +51,6 @@ export function requestDetect(imageData, opts) {
 
 // The most recent quads returned by the worker (drawn every frame).
 export function latestQuads() { return latest; }
+
+// The most recent Hough line segments (method=hough), drawn every frame.
+export function latestSegments() { return latestSeg; }

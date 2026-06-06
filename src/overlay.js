@@ -167,6 +167,26 @@ export function drawDetections(ctx, quads) {
   ctx.restore();
 }
 
+// Debug overlay for the Canny + probabilistic-Hough explorer: draw each detected
+// line segment, hue-coded by orientation (mod 180°) so the dominant edge
+// directions of a corner-on cube cluster into a few colours and read at a glance.
+// Geometry only (no canvas text — it reads backwards under the preview mirror).
+export function drawSegments(ctx, segments, lineWidth = 2) {
+  ctx.save();
+  ctx.lineWidth = lineWidth;
+  ctx.lineCap = 'round';
+  for (const s of segments) {
+    let deg = Math.atan2(s.y2 - s.y1, s.x2 - s.x1) * 180 / Math.PI; // -180..180
+    if (deg < 0) deg += 180;                                        // orientation, 0..180
+    ctx.strokeStyle = `hsl(${deg * 2}, 95%, 55%)`;                  // map orientation to full hue wheel
+    ctx.beginPath();
+    ctx.moveTo(s.x1, s.y1);
+    ctx.lineTo(s.x2, s.y2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 // Debug overlay for grouping: draw each recovered cube face's cells in a distinct
 // colour and connect adjacent grid cells, so the 3x3 lattices found among the
 // detected quads (and the rejection of clutter) are visible live. Geometry only.

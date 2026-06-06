@@ -122,6 +122,15 @@ gaps / next steps:
 - `detection.js` is still the seam for true cube tracking (contour detection +
   6-DoF pose via `solvePnP`, 3D arrows with three.js), which would drop the
   align-to-guide requirement entirely.
+- A **line-based detector** (Canny + probabilistic Hough) is being explored as an
+  alternative to the quad/contour path. `detectLineSegments` (`detect.js`) returns
+  raw segments; the `?detect&method=hough` overlay draws them hue-coded by
+  orientation (`drawSegments` in `overlay.js`), and `tools/hough-image.mjs` renders
+  the same on a still frame (add `bg=black` to see lines without the cube). On a
+  corner-on cube the three face directions cluster into a few hues; the open work is
+  filtering background clutter and fitting the three vanishing directions / grid.
+  This shares the worker harness with the quad detector — `cv-worker.js` dispatches
+  on `opts.method`, returning `{type:'segments'}` for hough vs `{type:'quads'}`.
 - Classification is balanced k-means over all 54 samples (done). A possible next
   step is weighting each sticker by sampling confidence (patch variance / glare),
   since oblique corner-on faces vary in quality more than flat-on did.
