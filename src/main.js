@@ -70,6 +70,10 @@ function render() {
     }
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+    // Sample the CLEAN frame for detection here — before any guide/arrow overlay is
+    // drawn onto the canvas, or the detector finds our own lines, not the cube.
+    if (DEBUG_DETECT) requestDetectFrame();
+
     if (state.phase === 'scanning') {
       const scene = computeCornerRegion(canvas.width, canvas.height, state.persp, state.scanIndex);
       drawCornerGuide(ctx, scene, true);
@@ -83,19 +87,26 @@ function render() {
       }
     }
 
-    if (DEBUG_DETECT) runDetectOverlay();
+    if (DEBUG_DETECT) drawDetectResults();
   }
   requestAnimationFrame(render);
 }
 
-// Ship a frame to the detection worker every few frames (it reads the whole
-// frame), then overlay whatever quads it last returned. Count goes to the status
-// bar, never the canvas (mirrored text would read backwards).
-function runDetectOverlay() {
-  if (!cvReady()) { setDetectStatus('detect: loading OpenCV…'); return; }
+// Ship the clean frame to the detection worker every few frames (it reads the
+// whole frame). Called BEFORE overlays are drawn, so the sampled pixels are the
+// raw camera image with none of our guide/arrow lines on them.
+function requestDetectFrame() {
+  if (!cvReady()) return;
   if (detectState.frame++ % 3 === 0) {
     requestDetect(ctx.getImageData(0, 0, canvas.width, canvas.height));
   }
+}
+
+// Overlay whatever quads the worker last returned (drawn after the guide so they
+// sit on top). Count goes to the status bar, never the canvas (mirrored text reads
+// backwards).
+function drawDetectResults() {
+  if (!cvReady()) { setDetectStatus('detect: loading OpenCV…'); return; }
   const quads = latestQuads();
   setDetectStatus(`detect: <b>${quads.length}</b> sticker quads`);
   drawDetections(ctx, quads);
