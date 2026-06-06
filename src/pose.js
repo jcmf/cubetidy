@@ -223,6 +223,81 @@ export function poseFromHomography(H, K) {
   return { R, t };
 }
 
+// --- iterative pose refinement (PnP via Gauss-Newton) ----------------------
+
+const skew = (a) => [[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]];
+
+// Exponential map so(3) -> SO(3) (Rodrigues), for an incremental rotation.
+function expSO3(w) {
+  const th = Math.hypot(w[0], w[1], w[2]);
+  if (th < 1e-12) return [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  const k = [w[0] / th, w[1] / th, w[2] / th];
+  const Kx = skew(k), K2 = mat3mul(Kx, Kx), s = Math.sin(th), c = 1 - Math.cos(th);
+  const I = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  return I.map((row, i) => row.map((e, j) => e + s * Kx[i][j] + c * K2[i][j]));
+}
+
+// Solve a small dense linear system A x = b by Gauss-Jordan; null if singular.
+function solveLinear(A, b) {
+  const n = b.length;
+  const M = A.map((r, i) => [...r, b[i]]);
+  for (let col = 0; col < n; col++) {
+    let piv = col;
+    for (let r = col + 1; r < n; r++) if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
+    if (Math.abs(M[piv][col]) < 1e-12) return null;
+    [M[col], M[piv]] = [M[piv], M[col]];
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const f = M[r][col] / M[col][col];
+      for (let k = col; k <= n; k++) M[r][k] -= f * M[col][k];
+    }
+  }
+  return b.map((_, i) => M[i][n] / M[i][i]);
+}
+
+// Refine a camera pose { R, t } to minimize reprojection error of 3D->2D
+// correspondences (Gauss-Newton over a 6-vector [rotation, translation]). Far more
+// stable than a single-face seed because it fuses all visible stickers at once.
+export function refinePnP(R0, t0, pts3D, pts2D, K, iters = 12) {
+  let R = R0.map((r) => r.slice()), t = [...t0];
+  for (let it = 0; it < iters; it++) {
+    const H = Array.from({ length: 6 }, () => new Array(6).fill(0));
+    const g = new Array(6).fill(0);
+    for (let i = 0; i < pts3D.length; i++) {
+      const Rx = mat3vec(R, pts3D[i]);            // R * X (rotation acts before t)
+      const Xc = [Rx[0] + t[0], Rx[1] + t[1], Rx[2] + t[2]];
+      if (Xc[2] <= 1e-6) continue;
+      const invz = 1 / Xc[2];
+      const ru = K.f * Xc[0] * invz + K.cx - pts2D[i][0];
+      const rv = K.f * Xc[1] * invz + K.cy - pts2D[i][1];
+      const dpu = [K.f * invz, 0, -K.f * Xc[0] * invz * invz];
+      const dpv = [0, K.f * invz, -K.f * Xc[1] * invz * invz];
+      // dXc/d[w,t] = [ -skew(R*X) | I ]
+      const a = Rx;
+      const dXc = [
+        [0, a[2], -a[1], 1, 0, 0],
+        [-a[2], 0, a[0], 0, 1, 0],
+        [a[1], -a[0], 0, 0, 0, 1],
+      ];
+      const Ju = new Array(6), Jv = new Array(6);
+      for (let k = 0; k < 6; k++) {
+        Ju[k] = dpu[0] * dXc[0][k] + dpu[1] * dXc[1][k] + dpu[2] * dXc[2][k];
+        Jv[k] = dpv[0] * dXc[0][k] + dpv[1] * dXc[1][k] + dpv[2] * dXc[2][k];
+      }
+      for (let r = 0; r < 6; r++) {
+        g[r] += Ju[r] * ru + Jv[r] * rv;
+        for (let c = 0; c < 6; c++) H[r][c] += Ju[r] * Ju[c] + Jv[r] * Jv[c];
+      }
+    }
+    const delta = solveLinear(H, g.map((x) => -x));
+    if (!delta) break;
+    R = mat3mul(expSO3([delta[0], delta[1], delta[2]]), R);
+    t = [t[0] + delta[3], t[1] + delta[4], t[2] + delta[5]];
+    if (Math.hypot(...delta) < 1e-10) break;
+  }
+  return { R, t };
+}
+
 // Mean reprojection error (pixels) of model<->image correspondences under a pose.
 // A convenient gauge-free check: the recovered pose is good iff this is small.
 export function reprojectionError(K, pose, correspondences) {

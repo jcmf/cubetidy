@@ -10,7 +10,7 @@
 
 import {
   estimateIntrinsics, intrinsicMatrix, intrinsicInverse,
-  project, applyHomography, homographyDLT, poseFromHomography, reprojectionError,
+  project, applyHomography, homographyDLT, poseFromHomography, reprojectionError, refinePnP,
 } from '../src/pose.js';
 
 let pass = 0, fail = 0;
@@ -122,6 +122,24 @@ for (const { axis, angle, t } of POSES) {
   const est = poseFromHomography(homographyDLT(corr), K);
   const reErr = reprojectionError(K, est, corr);
   check('noisy detection: pose still reprojects within ~1px', reErr < 1.5, `meanErr=${reErr}`);
+})();
+
+// --- PnP refinement: converges to the true pose from a perturbed start --------
+
+(() => {
+  const truth = { R: rotationAxisAngle([0.3, 1, 0.2], 0.5), t: [0.5, -0.3, 12] };
+  const pts3D = [];
+  for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) pts3D.push([x, y, z]);
+  const pts2D = pts3D.map((X) => project(K, truth, X));
+
+  // Start well off truth, refine.
+  const R0 = rotationAxisAngle([0.3, 1, 0.2], 0.5 + 0.25);
+  const t0 = [0.5 + 0.8, -0.3 - 0.6, 12 + 1.5];
+  const est = refinePnP(R0, t0, pts3D, pts2D, K);
+  const reErr = reprojectionError(K, est, pts3D.map((X, i) => ({ X, u: pts2D[i] })));
+  check('refinePnP: converges to sub-pixel reprojection from a perturbed start', reErr < 1e-3, `meanErr=${reErr}`);
+  const tErr = Math.hypot(est.t[0] - truth.t[0], est.t[1] - truth.t[1], est.t[2] - truth.t[2]);
+  check('refinePnP: recovers the true translation', tErr < 1e-2, `dt=${tErr}`);
 })();
 
 console.log(`\n${pass} passed, ${fail} failed`);
