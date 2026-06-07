@@ -171,13 +171,22 @@ gaps / next steps:
     wrong scale alias; (2) the gate: `locked` only when ≥`minCorr` corners reproject
     within `maxReprojFrac`·edge (knobs in the panel). A wrong/weak R yields few corners
     or a loose fit and does NOT lock, so the overlay shows a bright wireframe only when
-    trustworthy (dim grey rough wireframe otherwise). Verified on synthetic (locks,
-    recovers metric t, rejects clutter-only). REAL FRAMES: the far/hard sample frames
-    correctly DON'T lock (weak perspective + fragmentary grid → loose reprojection); a
-    cube held close enough for a full crisp grid is needed to lock — verify live.
-  - **Next:** harden on a real close-held cube (tune `maxReprojFrac`/`minLineLen`),
-    temporal smoothing of the locked pose, then read sticker colours off the grid cells
-    to assemble the facelet string (the 24-fold R disambiguates once colours are known).
+    trustworthy (dim grey rough wireframe otherwise). Verified on synthetic and on real
+    close-held frames (`samples/close1-3` lock with a correct wireframe; `corner2` /
+    `solved-hand` / `scrambled-hand` lock; far/weak `corner1` / `corner3` correctly
+    don't). Two fixes were needed for real frames: (a) seed depth from the inlier
+    ENDPOINT SPREAD, not segment length — Hough fragments a close cube's grid so length
+    under-reads its size and places it far too deep (outside the depth-scan band);
+    (b) `solveCubeFromLines` SWEEPS the inlier angle (`vpSweep` = 3–6°) and keeps the
+    best lock — the angle yielding a good orthogonal frame varies frame-to-frame and no
+    single value is reliable (3° drops `close2`, 5° drops `close1`/`corner2`). A wrong
+    frame fails to lock at every angle, so the sweep can't manufacture a false lock.
+    Live and offline both call `solveCubeFromLines`; an explicit `vpMaxErrorDeg` from
+    the panel pins the sweep to one value.
+  - **Next:** temporal smoothing of the locked pose across frames (consecutive frames
+    still differ; fuse like the quad path's `smoothCube`), then read sticker colours off
+    the grid cells to assemble the facelet string (the 24-fold R disambiguates once
+    colours are known).
 - The `?detect` harness has an **on-page tuning panel** (`buildDetectPanel` in
   `main.js`, `#detect-panel` styles) so the detector's knobs are sliders + a method
   dropdown, not query-string edits. Sliders are schema-driven (`DETECT_PARAMS`,

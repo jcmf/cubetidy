@@ -415,20 +415,22 @@ export function estimateRotationFromLines(segments, K, opts = {}) {
 }
 
 // A rough pose to seed the metric refinement (and to draw the untrusted overlay):
-// keep R, centre a unit cube on the inlier segments' image centroid, and set depth
-// from the apparent grid-line length — a full grid line spans ~1 cube unit, so
-// edge_px ≈ f/Z. A high percentile of segment lengths approximates a full edge (Hough
-// returns fragments), which estimates depth far better than the centroid spread and
-// keeps the first association from grabbing the wrong (periodic) grid line.
+// keep R, centre a unit cube on the inlier endpoints, and set depth from their image
+// SPREAD (RMS distance from the centroid). Depth from segment LENGTH fails here —
+// Hough breaks a close cube's grid into short fragments, so length underestimates the
+// cube's size and puts it far too deep; the endpoint spread tracks the actual image
+// footprint regardless of fragmentation. It's only a seed: the depth scan in
+// recoverCubePose refines it, so the constant just needs to land within the scan band.
 function roughPose(R, families, K) {
-  const segs = families.flatMap((f) => f.segments);
-  if (segs.length < 2) return null;
+  const pts = families.flatMap((f) => f.segments).flatMap((s) => [[s.x1, s.y1], [s.x2, s.y2]]);
+  if (pts.length < 4) return null;
   let mx = 0, my = 0;
-  for (const s of segs) { mx += (s.x1 + s.x2) / 2; my += (s.y1 + s.y2) / 2; }
-  mx /= segs.length; my /= segs.length;
-  const lens = segs.map((s) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1)).sort((a, b) => a - b);
-  const edgePx = lens[Math.floor(lens.length * 0.75)] || 1;
-  const Z = K.f / Math.max(edgePx, 1);
+  for (const [x, y] of pts) { mx += x; my += y; }
+  mx /= pts.length; my /= pts.length;
+  let rms = 0;
+  for (const [x, y] of pts) rms += (x - mx) ** 2 + (y - my) ** 2;
+  rms = Math.sqrt(rms / pts.length) || 1;
+  const Z = K.f * 0.6 / rms;
   return { R, t: [(mx - K.cx) / K.f * Z, (my - K.cy) / K.f * Z, Z] };
 }
 
@@ -438,7 +440,8 @@ export const POSE_DEFAULTS = {
   poseIters: 4,         // ICP-style associate→refine passes
   assocFrac: 0.6,       // associate a grid corner to lines within this fraction of a cell
   minCorr: 10,          // need at least this many grid-corner correspondences to lock
-  maxReprojFrac: 0.08,  // ...reprojecting within this fraction of the cube edge (px)
+  maxReprojFrac: 0.1,   // ...reprojecting within this fraction of the cube edge (px)
+  vpSweep: [3, 4, 5, 6],// inlier angles (deg) solveCubeFromLines tries; the best lock wins
 };
 
 // A 3×3 face is split by lines at these offsets (±½ boundaries, ±1/6 internal) along
@@ -560,8 +563,8 @@ export function recoverCubePose(rot, K, opts = {}) {
     return err / (w || 1);
   };
   let bestZ = t0[2], bestZErr = Infinity;
-  for (let i = 0; i <= 40; i++) {
-    const z = t0[2] * (0.4 * Math.pow(2.5 / 0.4, i / 40));   // geometric scan 0.4×..2.5× rough depth
+  for (let i = 0; i <= 60; i++) {
+    const z = t0[2] * (0.3 * Math.pow(3.5 / 0.3, i / 60));   // geometric scan 0.3×..3.5× rough depth
     const e = lineMatchErr({ R: rot.R, t: [z * ray[0], z * ray[1], z] });
     if (e < bestZErr) { bestZErr = e; bestZ = z; }
   }
@@ -602,4 +605,30 @@ export function recoverCubePose(rot, K, opts = {}) {
   const edgePx = edgePixels(K, best.pose);
   const locked = best.X3.length >= o.minCorr && best.err <= o.maxReprojFrac * edgePx;
   return { pose: best.pose, count: best.X3.length, reprojErr: best.err, edgePx, locked };
+}
+
+// Full line→cube solve. The inlier angle that yields a good orthogonal frame varies
+// frame to frame (noisier lines want a looser angle; a looser angle elsewhere lets a
+// wrong frame win), and no single value is reliable across consecutive frames. So
+// SWEEP a few angles, run rotation→pose for each, and keep the best result — a lock
+// beats a non-lock, ties broken by lowest reprojection. A wrong frame fails to lock at
+// every angle (too few corners), so the sweep can't manufacture a false lock. An
+// explicit vpMaxErrorDeg (e.g. from the tuning panel) pins the sweep to that one value.
+// Returns { rot, pose } (pose may be null/unlocked) or null if no rotation at all.
+export function solveCubeFromLines(segments, K, opts = {}) {
+  const sweep = opts.vpMaxErrorDeg != null ? [opts.vpMaxErrorDeg] : (opts.vpSweep ?? POSE_DEFAULTS.vpSweep);
+  let best = null;
+  for (const deg of sweep) {
+    const o2 = { ...opts, vpMaxErrorDeg: deg };
+    const rot = estimateRotationFromLines(segments, K, o2);
+    if (!rot) continue;
+    const pose = recoverCubePose(rot, K, o2);
+    const cand = { rot, pose };
+    if (!best) { best = cand; continue; }
+    const la = best.pose && best.pose.locked, lb = pose && pose.locked;
+    if (la !== lb) { if (lb) best = cand; }
+    else if (la && lb) { if (pose.reprojErr < best.pose.reprojErr) best = cand; }
+    else if ((pose ? pose.count : 0) > (best.pose ? best.pose.count : 0)) best = cand;
+  }
+  return best;
 }

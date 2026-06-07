@@ -9,14 +9,14 @@ import { findFaceGrids, fitFaceGrid } from './group.js';
 import { estimateCubePose } from './cube-pose.js';
 import { estimateIntrinsics } from './pose.js';
 import { DETECT_DEFAULTS, HOUGH_DEFAULTS } from './detect.js';
-import { groupLineSegments, estimateRotationFromLines, recoverCubePose, VP_DEFAULTS, ROT_DEFAULTS, POSE_DEFAULTS } from './lines.js';
+import { groupLineSegments, solveCubeFromLines, VP_DEFAULTS, ROT_DEFAULTS, POSE_DEFAULTS } from './lines.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
 // Detection runs in a worker; this is pure visualization, not wired into the
 // scan state machine yet.
 const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
-const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null, lastSegments: null, grouping: null, rot: null, pose: null, K: null };
+const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null, lastSegments: null, grouping: null, sol: null, K: null };
 // Every query param besides `detect` overrides a DETECT_DEFAULTS knob, so detection
 // can be tuned live from the URL without a rebuild, e.g.
 //   ?detect&method=adaptive&blockSize=51&C=7   or   ?detect&cannyLo=20&minFill=0.4
@@ -197,20 +197,19 @@ function drawDetectResults() {
     if (segments !== detectState.lastSegments) {
       detectState.lastSegments = segments;
       detectState.K = estimateIntrinsics(canvas.width, canvas.height);
-      detectState.rot = estimateRotationFromLines(segments, detectState.K, detectOpts);
-      detectState.grouping = detectState.rot || groupLineSegments(segments, detectOpts);
-      detectState.pose = detectState.rot ? recoverCubePose(detectState.rot, detectState.K, detectOpts) : null;
+      detectState.sol = solveCubeFromLines(segments, detectState.K, detectOpts);
+      detectState.grouping = detectState.sol ? detectState.sol.rot : groupLineSegments(segments, detectOpts);
     }
-    const g = detectState.grouping, r = detectState.rot, P = detectState.pose;
+    const g = detectState.grouping, sol = detectState.sol, P = sol && sol.pose;
     if (g && g.families.length) drawLineGroups(ctx, g);
     else drawSegments(ctx, segments);
     if (P && P.locked) drawCubeWireframe(ctx, detectState.K, P.pose, '#39ff14');
-    else if (r && r.pose) drawCubeWireframe(ctx, detectState.K, r.pose, 'rgba(150,160,175,0.55)');
+    else if (sol && sol.rot.pose) drawCubeWireframe(ctx, detectState.K, sol.rot.pose, 'rgba(150,160,175,0.55)');
     const counts = g && g.families.length ? g.families.map((f) => f.segments.length).join('/') : '—';
     setDetectStatus(
       `detect[hough]: <b>${segments.length}</b> segs · families <b>${counts}</b>` +
       (P && P.locked ? ` · <b>LOCK</b> ${P.count}pts ${P.reprojErr.toFixed(1)}px`
-        : r ? ' · R only (low conf)' : ' · no R'));
+        : sol ? ' · R only (low conf)' : ' · no R'));
     return;
   }
 

@@ -9,7 +9,7 @@
 //
 // Run: npm test
 
-import { groupLineSegments, estimateRotationFromLines, recoverCubePose, fitVanishingPoint, lineVPError } from '../src/lines.js';
+import { groupLineSegments, estimateRotationFromLines, recoverCubePose, solveCubeFromLines, fitVanishingPoint, lineVPError } from '../src/lines.js';
 import { estimateIntrinsics, project } from '../src/pose.js';
 
 let pass = 0, fail = 0;
@@ -289,6 +289,10 @@ function cubeGridSegments(R, t, rand) {
   const rot = estimateRotationFromLines(segments, K, { vpMaxErrorDeg: 3 });
   const est = rot && recoverCubePose(rot, K, {});
   check('pose: locks onto the cube', !!est && est.locked, est ? `count=${est.count} err=${est.reprojErr.toFixed(2)} edge=${est.edgePx.toFixed(0)}` : 'null');
+
+  // The full sweep wrapper also locks (and picks a locked result).
+  const sol = solveCubeFromLines(segments, K, {});
+  check('solve: sweep wrapper locks onto the cube', !!sol && !!sol.pose && sol.pose.locked, sol && sol.pose ? `count=${sol.pose.count} err=${sol.pose.reprojErr.toFixed(2)}` : 'no lock');
   if (est) {
     // The cube centre is invariant under the 24 symmetries, so t is unambiguous.
     const dt = Math.hypot(est.pose.t[0] - t[0], est.pose.t[1] - t[1], est.pose.t[2] - t[2]);

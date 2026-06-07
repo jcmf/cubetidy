@@ -21,7 +21,7 @@ import { mkdirSync } from 'node:fs';
 import cv from '@techstark/opencv-js';
 import { estimateIntrinsics } from '../src/pose.js';
 import { detectLineSegments } from '../src/detect.js';
-import { groupLineSegments, estimateRotationFromLines, recoverCubePose } from '../src/lines.js';
+import { groupLineSegments, solveCubeFromLines } from '../src/lines.js';
 import { drawSegments, drawLineGroups, drawCubeWireframe } from '../src/overlay.js';
 
 await new Promise((r) => { if (cv && cv.Mat) return r(); cv.onRuntimeInitialized = r; });
@@ -60,14 +60,14 @@ for (const p of paths) {
     info = `${segments.length} segs | families ${g.families.map((f) => f.segments.length).join('/')} | ${g.outliers.length} outliers`;
   } else {
     const K = estimateIntrinsics(img.width, img.height);
-    const est = estimateRotationFromLines(segments, K, opts);
-    const g = est || groupLineSegments(segments, opts);
+    const sol = solveCubeFromLines(segments, K, opts);
+    const g = sol ? sol.rot : groupLineSegments(segments, opts);
     drawLineGroups(ctx, g);
-    const P = est && recoverCubePose(est, K, opts);
+    const P = sol && sol.pose;
     if (P && P.locked) drawCubeWireframe(ctx, K, P.pose, '#39ff14');
-    else if (est && est.pose) drawCubeWireframe(ctx, K, est.pose, 'rgba(150,160,175,0.7)');
+    else if (sol && sol.rot.pose) drawCubeWireframe(ctx, K, sol.rot.pose, 'rgba(150,160,175,0.7)');
     info = `${segments.length} segs | families ${g.families.map((f) => f.segments.length).join('/')} | ${g.outliers.length} out | `
-      + (!est ? 'no R' : `${P.locked ? 'LOCK' : 'unlocked'} ${P.count}pts ${P.reprojErr.toFixed(1)}px / edge ${P.edgePx.toFixed(0)}`);
+      + (!sol ? 'no R' : !P ? 'R only' : `${P.locked ? 'LOCK' : 'unlocked'} ${P.count}pts ${P.reprojErr.toFixed(1)}px / edge ${P.edgePx.toFixed(0)}`);
   }
 
   const outDir = join(dirname(p), 'annotated');
