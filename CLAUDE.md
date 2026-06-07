@@ -196,21 +196,27 @@ gaps / next steps:
     `smoothLinePose` is pure too (state in/out) and tested with a synthetic sequence
     (holds through wrong locks, re-acquires on a sustained move, releases on dropout).
     Panel knobs: `poseAlpha` / `poseGateAngle` / `poseReacquire`.
-  - **Step 3c (done): kill the scale/position aliasing.** The lock was right-angle but
-    wrong-size/position and flickered, because the 3×3 grid is PERIODIC: a ⅔-scaled /
-    cell-shifted cube reprojects nearly as well, and `refinePnP` (minimizing corner
-    reprojection) actively PREFERS the too-small alias regardless of where it starts (a
-    grid-match depth scan flickered between aliases frame to frame). Fix: the detected
-    line field's overall EXTENT is alias-free, so PIN scale to it — after each PnP step,
-    scale `t` along its ray so the projected cube spans the detected lines. Scaling `t`
-    along its own ray leaves the projected CENTRE fixed and only changes apparent SIZE,
-    so PnP still refines rotation + image-position freely while scale can't drift to an
-    alias. Extent is measured on the visible-face grid-line endpoints (what the detected
-    lines are), with a ROBUST bbox (median centre, drop endpoints beyond 3× the median
-    radius) — a few clutter lines that slip into a family would otherwise blow a plain
-    bbox up ~4× and place the cube wildly wrong. Result: depth is stable across
-    consecutive frames (close1-3 all lock at Z≈2.5, extent ratio ~1) and the overlay
-    fits. Verify live steadiness on a close cube.
+  - **Step 3c (done): kill the translation aliasing — recover t WITHOUT corner PnP.**
+    The lock was right-angle but wrong-size/position and flickered by whole stickers,
+    because the 3×3 grid is PERIODIC: a ⅔-scaled / cell-shifted cube reprojects nearly as
+    well, and ANY corner-reprojection objective (`refinePnP`, grid-match) actively PREFERS
+    the alias (it fits a tight subset). Tellingly, reprojection was anti-correlated with
+    correctness across frames (the lowest-error frame was the most wrong). So translation
+    is NOT recovered by PnP at all — it's recovered from two alias-free image statistics:
+      1. the line field's overall EXTENT → depth/scale (anchorT scales `t` along its ray;
+         scaling `t` along its own ray leaves the projected CENTRE fixed, only resizing);
+      2. its CENTROID → lateral position (anchorT shifts `t` laterally).
+    Both use the visible-face grid-line endpoints (model and detected alike, so the
+    corner-on "front faces only" bias cancels) with a ROBUST bbox/centroid (median centre,
+    drop endpoints beyond 3× median radius — a stray clutter line in a family otherwise
+    blows a plain bbox up ~4×). That anchor picks the right CELL but is coarse; it's then
+    sharpened by a local search maximizing soft COVERAGE — detected line length lying ON a
+    projected grid line (ramped by distance). Coverage is the one objective NOT fooled by
+    the aliases: a shifted/shrunk cube leaves the OUTER detected lines uncovered, lowering
+    it. `solveCubeFromLines` likewise selects the sweep's best lock by COVERAGE, never
+    reprojection. R still comes from the VPs (unchanged). Result on the `ceiling1-6`
+    samples: all lock tight (reproj ~2-6% of edge) and consistent (edge spread 18%→6%),
+    grid overlays the detected lines. Knob `minCover`. Verify live steadiness/accuracy.
   - **Next:** read sticker colours off the locked grid cells to assemble the facelet
     string (the 24-fold R disambiguates once colours are known).
 - The `?detect` harness has an **on-page tuning panel** (`buildDetectPanel` in

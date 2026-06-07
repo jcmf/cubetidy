@@ -441,6 +441,7 @@ export const POSE_DEFAULTS = {
   assocFrac: 0.6,       // associate a grid corner to lines within this fraction of a cell
   minCorr: 10,          // need at least this many grid-corner correspondences to lock
   maxReprojFrac: 0.1,   // ...reprojecting within this fraction of the cube edge (px)
+  minCover: 0.45,       // ...and at least this fraction of detected line length on the grid
   vpSweep: [3, 4, 5, 6],// inlier angles (deg) solveCubeFromLines tries; the best lock wins
 };
 
@@ -536,60 +537,61 @@ export function recoverCubePose(rot, K, opts = {}) {
     return s / (X3.length || 1);
   };
 
-  // Depth is the one DOF the rough pose gets badly wrong (foreshortening makes grid
-  // lines look shorter, so length-based depth is biased) — and the periodic grid means
-  // a bad scale lets ICP settle on a wrong alias. So before ICP, SCAN depth: slide the
-  // cube along the centroid ray and pick the depth whose projected grid lines best
-  // overlay the detected lines. A 1-D scan can't fall into a local minimum.
+  // TRANSLATION is where the PERIODIC 3×3 grid ALIASES: a ⅔-scaled OR one-cell-shifted
+  // cube reprojects nearly as well (corner reprojection is even LOWER for the shifted
+  // alias), so refinePnP drifts the cube's scale/position by whole stickers and the
+  // overlay flickers between cells. Corner reprojection therefore can't choose the
+  // translation. Two alias-FREE image statistics can: the line field's overall EXTENT
+  // (→ depth/scale) and its CENTROID (→ lateral position). So we don't let PnP set the
+  // translation at all — we ANCHOR it from extent + centroid, and use PnP only to refine
+  // the rotation, re-anchoring t after every step. Both statistics are computed on the
+  // visible-face grid-line endpoints — for the model and the detection alike — so the
+  // corner-on "front faces only" bias cancels and the cube lands centred and full-size.
   const t0 = rot.pose.t;
-  const ray = [t0[0] / t0[2], t0[1] / t0[2], 1];   // image-centroid ray; t = z·ray
-  const poseAt = (z) => ({ R: rot.R, t: [z * ray[0], z * ray[1], z] });
-
-  // Scale (and the lateral position coupled to it) is where the PERIODIC 3×3 grid
-  // ALIASES — a ⅔-scaled / cell-shifted cube reprojects nearly as well, and refinePnP
-  // (minimizing corner reprojection) actually PREFERS the too-small alias because its
-  // grid fits a tight subset, regardless of where it starts. The detected line field's
-  // overall EXTENT is alias-free, so we pin scale to it: after each PnP step, scale t
-  // along its ray so the projected cube spans the detected lines. Scaling t along its
-  // own ray leaves the projected CENTRE fixed and only changes apparent SIZE, so PnP
-  // still refines rotation and image-position freely while scale can't drift to an
-  // alias. Extent is measured on the VISIBLE-face grid-line endpoints (what the detected
-  // lines are) — not the 8 corners, whose hidden back ones would bias it.
-  // Robust extent (bbox diagonal): a few clutter lines slip into families and a single
-  // scattered endpoint would wreck a plain bbox, so drop endpoints beyond 3× the median
-  // radius about the median centre first. The SAME measure is used for detected and
-  // model endpoints, so the ratio stays unbiased.
   const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1] || 0; };
+  // Robust bbox diagonal: a few clutter lines slip into families, and one scattered
+  // endpoint would wreck a plain bbox, so drop endpoints beyond 3× the median radius.
   const robustExtent = (pts) => {
     if (pts.length < 4) return 0;
     const cx = median(pts.map((p) => p[0])), cy = median(pts.map((p) => p[1]));
     const ds = pts.map((p) => Math.hypot(p[0] - cx, p[1] - cy));
     const md = median(ds) || 1;
-    const keep = pts.filter((_, i) => ds[i] <= 3 * md);
-    const k = keep.length >= 4 ? keep : pts;
-    const xs = k.map((p) => p[0]), ys = k.map((p) => p[1]);
+    const k = pts.filter((_, i) => ds[i] <= 3 * md);
+    const kk = k.length >= 4 ? k : pts;
+    const xs = kk.map((p) => p[0]), ys = kk.map((p) => p[1]);
     return Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
   };
   const allModelEnds = modelLines.flat().flatMap(([A, B]) => [A, B]);
-  const cubeExtent = (pose) => robustExtent(allModelEnds.map((P) => project(K, pose, P)));
-  const detExt = robustExtent(rot.families.flatMap((f) => f.segments).flatMap((s) => [[s.x1, s.y1], [s.x2, s.y2]])) || 1;
-  const snapScale = (pose) => {
-    const s = cubeExtent(pose) / detExt;   // extent ∝ 1/Z; scaling t by s scales apparent size by 1/s
-    return { R: pose.R, t: [pose.t[0] * s, pose.t[1] * s, pose.t[2] * s] };
+  const project2 = (pose, pts) => pts.map((P) => project(K, pose, P));
+  const cubeExtent = (pose) => robustExtent(project2(pose, allModelEnds));
+  const cubeCentre = (pose) => { const ps = project2(pose, allModelEnds); return [median(ps.map((p) => p[0])), median(ps.map((p) => p[1]))]; };
+
+  const detPts = rot.families.flatMap((f) => f.segments).flatMap((s) => [[s.x1, s.y1], [s.x2, s.y2]]);
+  const detExt = robustExtent(detPts) || 1;
+  const detCentre = [median(detPts.map((p) => p[0])), median(detPts.map((p) => p[1]))];
+
+  // Place the cube (given R) so its projected grid spans and is centred like the detected
+  // lines: alternate matching extent (scale t along its ray) and centroid (shift t
+  // laterally) — both alias-free — to convergence. This fixes WHICH CELL the cube sits in.
+  const anchorT = (R, z0) => {
+    let z = z0;
+    let t = [(detCentre[0] - K.cx) / K.f * z, (detCentre[1] - K.cy) / K.f * z, z];
+    for (let i = 0; i < 8; i++) {
+      const s = cubeExtent({ R, t }) / detExt;            // extent ∝ 1/Z
+      t = [t[0] * s, t[1] * s, t[2] * s];
+      const c = cubeCentre({ R, t });
+      t = [t[0] + (detCentre[0] - c[0]) * t[2] / K.f, t[1] + (detCentre[1] - c[1]) * t[2] / K.f, t[2]];
+    }
+    return t;
   };
 
-  let zAnchor = t0[2];
-  for (let it = 0; it < 3; it++) zAnchor *= cubeExtent(poseAt(zAnchor)) / detExt;  // extent-match init
-
-  // ICP: associate, robustly trim mis-associations, refit, then PIN the scale to the
-  // detected extent. Keep the best (lowest reprojection) scale-pinned pose.
-  let pose = poseAt(zAnchor);
-  let best = { pose, X3: [], q2: [], err: Infinity };
-  for (let iter = 0; iter < o.poseIters; iter++) {
-    const thresh = Math.max(4, edgePixels(K, pose) / 3 * o.assocFrac);
+  // Associate model grid corners to detected line crossings (the two in-plane families'
+  // nearest lines), robustly trimming mis-associations.
+  const associate = (P) => {
+    const thresh = Math.max(4, edgePixels(K, P) / 3 * o.assocFrac);
     const X3 = [], q2 = [];
     for (const m of models) {
-      const p = project(K, pose, m.X);
+      const p = project(K, P, m.X);
       const la = nearestLine(famLines[m.a], p[0], p[1], thresh);
       const lb = nearestLine(famLines[m.b], p[0], p[1], thresh);
       if (!la.line || !lb.line || la.dist > thresh || lb.dist > thresh) continue;
@@ -597,26 +599,63 @@ export function recoverCubePose(rot, K, opts = {}) {
       if (!q || Math.hypot(q[0] - p[0], q[1] - p[1]) > thresh) continue;
       X3.push(m.X); q2.push(q);
     }
-    if (X3.length < o.minCorr) break;
-    // Trim correspondences far from the current pose (mis-associations) before refit.
-    const r = X3.map((X, i) => { const p = project(K, pose, X); return Math.hypot(p[0] - q2[i][0], p[1] - q2[i][1]); });
+    const r = X3.map((X, i) => { const p = project(K, P, X); return Math.hypot(p[0] - q2[i][0], p[1] - q2[i][1]); });
     const med = [...r].sort((a, b) => a - b)[r.length >> 1] || 0;
     const cut = Math.max(3, 2.5 * med);
-    const k = r.map((v, i) => (v <= cut ? i : -1)).filter((i) => i >= 0);
-    const iX = k.map((i) => X3[i]), iq = k.map((i) => q2[i]);
-    if (iX.length < o.minCorr) break;
-    const refined = refinePnP(pose.R, pose.t, iX, iq, K);
-    if (!Number.isFinite(refined.t[0]) || !Number.isFinite(refined.t[2]) || refined.t[2] <= 0) break;
-    const next = snapScale(refined);                  // pin scale to the alias-free extent
-    const err = meanErr(next, iX, iq);
-    if (err < best.err) best = { pose: next, X3: iX, q2: iq, err };
-    pose = next;
-  }
+    const keep = r.map((v, i) => (v <= cut ? i : -1)).filter((i) => i >= 0);
+    return { X3, q2, iX: keep.map((i) => X3[i]), iq: keep.map((i) => q2[i]) };
+  };
 
-  const edgePx = edgePixels(K, best.pose);
-  const extRatio = cubeExtent(best.pose) / detExt;    // ~1 by construction (scale is pinned)
-  const locked = best.X3.length >= o.minCorr && best.err <= o.maxReprojFrac * edgePx;
-  return { pose: best.pose, count: best.X3.length, reprojErr: best.err, edgePx, extRatio, locked };
+  // Tighten TRANSLATION by maximizing soft COVERAGE: the detected line length lying ON a
+  // projected grid line, ramped down by distance. Corner reprojection (and grid-match)
+  // PREFER the periodic aliases — a cell-shifted / shrunk cube fits a subset tighter — so
+  // they pull the fit off by whole stickers. Coverage does the opposite: the alias leaves
+  // the OUTER detected lines uncovered, lowering its score, so the correct cube wins. We
+  // search a small box (±~½ cell laterally, ±8% depth) about the alias-free anchor.
+  const projGrid = (P) => modelLines.map((dir) => dir.map(([A, B]) => {
+    const a = project(K, P, A), b = project(K, P, B);
+    let na = a[1] - b[1], nb = b[0] - a[0], nc = a[0] * b[1] - b[0] * a[1];
+    const n = Math.hypot(na, nb) || 1;
+    return [na / n, nb / n, nc / n];
+  }));
+  const softCover = (P, tol) => {
+    const pml = projGrid(P);
+    let sc = 0;
+    for (let c = 0; c < 3; c++) for (const s of rot.families[c].segments) {
+      const mx = (s.x1 + s.x2) / 2, my = (s.y1 + s.y2) / 2, len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1) || 1;
+      let d = Infinity;
+      for (const L of pml[c]) d = Math.min(d, Math.abs(L[0] * mx + L[1] * my + L[2]));
+      sc += len * Math.max(0, 1 - d / tol);
+    }
+    return sc;
+  };
+  // Slide t: scale along its ray (depth) then shift laterally (Δcentre = Δt·f/z).
+  const slid = (R, t, ds, dx, dy) => { const u = [t[0] * ds, t[1] * ds, t[2] * ds]; return { R, t: [u[0] + dx * u[2] / K.f, u[1] + dy * u[2] / K.f, u[2]] }; };
+
+  let pose = { R: rot.R, t: anchorT(rot.R, t0[2]) };
+  const cell0 = edgePixels(K, pose) / 3 || 1;
+  const tol = 0.22 * cell0;
+  const search = (centre, dStep, latStep) => {
+    let bestP = centre, bestS = softCover(centre, tol);
+    for (let i = -3; i <= 3; i++) for (let j = -3; j <= 3; j++) for (let kk = -2; kk <= 2; kk++) {
+      const P = slid(centre.R, centre.t, 1 + kk * dStep, i * latStep, j * latStep);
+      const s = softCover(P, tol);
+      if (s > bestS) { bestS = s; bestP = P; }
+    }
+    return bestP;
+  };
+  pose = search(pose, 0.04, 0.28 * cell0);    // coarse: ±0.84 cell lateral, ±8% depth
+  pose = search(pose, 0.015, 0.09 * cell0);   // fine
+  pose = search(pose, 0.006, 0.035 * cell0);  // finer
+
+  const fin = associate(pose);
+  const edgePx = edgePixels(K, pose);
+  const extRatio = cubeExtent(pose) / detExt;
+  const totLen = rot.families.reduce((s, f) => s + f.segments.reduce((a, x) => a + Math.hypot(x.x2 - x.x1, x.y2 - x.y1), 0), 0) || 1;
+  const cover = softCover(pose, tol) / totLen;   // ~fraction of detected length on the grid
+  const err = fin.X3.length ? meanErr(pose, fin.X3, fin.q2) : Infinity;
+  const locked = fin.X3.length >= o.minCorr && cover >= (o.minCover ?? 0.45);
+  return { pose, count: fin.X3.length, reprojErr: err, edgePx, extRatio, cover, locked };
 }
 
 // Full line→cube solve. The inlier angle that yields a good orthogonal frame varies
@@ -641,8 +680,10 @@ export function solveCubeFromLines(segments, K, opts = {}) {
     if (!best) { best = cand; continue; }
     const la = best.fit && best.fit.locked, lb = fit && fit.locked;
     if (la !== lb) { if (lb) best = cand; }
-    else if (la && lb) { if (fit.reprojErr < best.fit.reprojErr) best = cand; }
-    else if ((fit ? fit.count : 0) > (best.fit ? best.fit.count : 0)) best = cand;
+    // Among locks, prefer higher COVERAGE (corner reprojection is alias-biased — a
+    // shifted/shrunk cube reprojects tighter — so it must NOT be the selector here).
+    else if (la && lb) { if (fit.cover > best.fit.cover) best = cand; }
+    else if ((fit ? fit.cover : 0) > (best.fit ? best.fit.cover : 0)) best = cand;
   }
   return best;
 }
