@@ -124,13 +124,24 @@ gaps / next steps:
   align-to-guide requirement entirely.
 - A **line-based detector** (Canny + probabilistic Hough) is being explored as an
   alternative to the quad/contour path. `detectLineSegments` (`detect.js`) returns
-  raw segments; the `?detect&method=hough` overlay draws them hue-coded by
-  orientation (`drawSegments` in `overlay.js`), and `tools/hough-image.mjs` renders
-  the same on a still frame (add `bg=black` to see lines without the cube). On a
-  corner-on cube the three face directions cluster into a few hues; the open work is
-  filtering background clutter and fitting the three vanishing directions / grid.
-  This shares the worker harness with the quad detector — `cv-worker.js` dispatches
-  on `opts.method`, returning `{type:'segments'}` for hough vs `{type:'quads'}`.
+  raw segments; `cv-worker.js` dispatches on `opts.method`, returning
+  `{type:'segments'}` for hough vs `{type:'quads'}`. `tools/hough-image.mjs` renders
+  the same pipeline on a still frame (`bg=black` to hide the cube, `raw=1` for
+  ungrouped segments).
+  - **Step 1 (done): vanishing-point grouping** (`src/lines.js`,
+    `test/lines.test.mjs`). A cube's edges run along 3 orthogonal directions, each
+    projecting to a vanishing point; `groupLineSegments` splits the segments into 3
+    families + their VPs (orientation-seeded k-means → EM that reassigns each line to
+    the VP it points at and refits each VP as the smallest eigenvector of Σℓℓᵀ, with
+    random restarts and Hartley normalization; clutter that points at no VP is an
+    outlier). `drawLineGroups` (`overlay.js`) colours by family + draws VP
+    crosshairs; `?detect&method=hough` shows it live, tunable via `vpMaxErrorDeg` /
+    `vpIters`. Works well when the cube dominates the frame; a *convergent background
+    bundle* (e.g. books) can still steal one of the 3 slots (fixed k=3) — clutter
+    rejection / cube-region focus is for step 2.
+  - **Step 2 (next): VPs → rotation** (cols of R ∝ K⁻¹·vpᵢ, with the 24-orientation
+    disambiguation `cube-pose.js` already does), then recover the lattice
+    intersections and feed the existing `pose.js`/`cube-pose.js` PnP for full 6-DoF.
 - The `?detect` harness has an **on-page tuning panel** (`buildDetectPanel` in
   `main.js`, `#detect-panel` styles) so the detector's knobs are sliders + a method
   dropdown, not query-string edits. Sliders are schema-driven (`DETECT_PARAMS`,

@@ -187,6 +187,54 @@ export function drawSegments(ctx, segments, lineWidth = 2) {
   ctx.restore();
 }
 
+// Debug overlay for vanishing-point grouping (the line-based detector, step 1):
+// colour each segment by which of the three cube-edge families it was assigned to,
+// faint convergence lines toward each family's vanishing point, and a crosshair at
+// any VP that lands near the frame. Outliers (clutter) are dim grey. Geometry only.
+const VP_COLORS = ['#28c8ff', '#ff5ac8', '#ffd200'];
+export function drawLineGroups(ctx, grouping) {
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const near = (x, y) => x > -2 * W && x < 3 * W && y > -2 * H && y < 3 * H;
+  ctx.save();
+  ctx.lineCap = 'round';
+
+  // Outliers first, underneath.
+  ctx.strokeStyle = 'rgba(150,160,175,0.45)';
+  ctx.lineWidth = 1.5;
+  for (const s of grouping.outliers) { ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke(); }
+
+  grouping.families.forEach((fam, fi) => {
+    const color = VP_COLORS[fi % VP_COLORS.length];
+    let vx = null, vy = null;
+    if (fam.vp && Math.abs(fam.vp[2]) > 1e-9) {
+      const x = fam.vp[0] / fam.vp[2], y = fam.vp[1] / fam.vp[2];
+      if (near(x, y)) { vx = x; vy = y; }
+    }
+    // Faint convergence lines from each segment's midpoint to a near-screen VP.
+    if (vx !== null) {
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.12;
+      ctx.lineWidth = 1;
+      for (const s of fam.segments) { ctx.beginPath(); ctx.moveTo((s.x1 + s.x2) / 2, (s.y1 + s.y2) / 2); ctx.lineTo(vx, vy); ctx.stroke(); }
+      ctx.globalAlpha = 1;
+    }
+    // The segments themselves.
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    for (const s of fam.segments) { ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke(); }
+    // VP crosshair.
+    if (vx !== null) {
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(vx - 12, vy); ctx.lineTo(vx + 12, vy);
+      ctx.moveTo(vx, vy - 12); ctx.lineTo(vx, vy + 12);
+      ctx.stroke();
+      ctx.beginPath(); ctx.arc(vx, vy, 7, 0, Math.PI * 2); ctx.stroke();
+    }
+  });
+  ctx.restore();
+}
+
 // Debug overlay for grouping: draw each recovered cube face's cells in a distinct
 // colour and connect adjacent grid cells, so the 3x3 lattices found among the
 // detected quads (and the rejection of clutter) are visible live. Geometry only.

@@ -2,20 +2,21 @@ import { startCamera } from './camera.js';
 import { computeRegion, computeCornerRegion, sampleCorner, CORNER_CAPTURES } from './detection.js';
 import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
-import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawCube, drawSegments } from './overlay.js';
+import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawCube, drawSegments, drawLineGroups } from './overlay.js';
 import { glyphSVG } from './glyph.js';
 import { startCV, cvReady, requestDetect, latestQuads, latestSegments } from './opencv.js';
 import { findFaceGrids, fitFaceGrid } from './group.js';
 import { estimateCubePose } from './cube-pose.js';
 import { estimateIntrinsics } from './pose.js';
 import { DETECT_DEFAULTS, HOUGH_DEFAULTS } from './detect.js';
+import { groupLineSegments, VP_DEFAULTS } from './lines.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
 // Detection runs in a worker; this is pure visualization, not wired into the
 // scan state machine yet.
 const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
-const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null };
+const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null, lastSegments: null, grouping: null };
 // Every query param besides `detect` overrides a DETECT_DEFAULTS knob, so detection
 // can be tuned live from the URL without a rebuild, e.g.
 //   ?detect&method=adaptive&blockSize=51&C=7   or   ?detect&cannyLo=20&minFill=0.4
@@ -47,6 +48,9 @@ const DETECT_PARAMS = [
   { k: 'minLineLen',  label: 'Min line len',   min: 0,      max: 300, step: 1,      methods: ['hough'] },
   { k: 'minLineFrac', label: 'Min line frac',  min: 0,      max: 0.3, step: 0.005,  methods: ['hough'] },
   { k: 'maxLineGap',  label: 'Max line gap',   min: 0,      max: 50,  step: 1,      methods: ['hough'] },
+  // vanishing-point grouping (step 1 of the line-based detector)
+  { k: 'vpMaxErrorDeg', label: 'VP max err°',  min: 0.5,    max: 15,  step: 0.5,    methods: ['hough'] },
+  { k: 'vpIters',     label: 'VP iters',       min: 1,      max: 12,  step: 1,      methods: ['hough'] },
   // canny quad detector
   { k: 'dilateIters', label: 'Dilate iters',   min: 0,      max: 5,   step: 1,      methods: ['canny'] },
   { k: 'closeIters',  label: 'Close iters',    min: 0,      max: 5,   step: 1,      methods: ['canny'] },
@@ -176,12 +180,22 @@ function requestDetectFrame() {
 function drawDetectResults() {
   if (!cvReady()) { setDetectStatus('detect: loading OpenCV…'); return; }
 
-  // method=hough: the Canny + probabilistic-Hough line explorer. Pure
-  // visualization of raw segments — no grouping/pose, just draw what Hough found.
+  // method=hough: Canny + probabilistic Hough, then group the segments into the
+  // three cube-edge families / vanishing points (step 1 of the line-based detector).
+  // Regroup only when the worker returns new segments; draw the families every frame.
   if (detectOpts.method === 'hough') {
     const segments = latestSegments();
-    drawSegments(ctx, segments);
-    setDetectStatus(`detect[hough]: <b>${segments.length}</b> line segments`);
+    if (segments !== detectState.lastSegments) {
+      detectState.lastSegments = segments;
+      detectState.grouping = groupLineSegments(segments, detectOpts);
+    }
+    const g = detectState.grouping;
+    if (g && g.families.length) drawLineGroups(ctx, g);
+    else drawSegments(ctx, segments);
+    const counts = g && g.families.length ? g.families.map((f) => f.segments.length).join('/') : '—';
+    setDetectStatus(
+      `detect[hough]: <b>${segments.length}</b> segs · families <b>${counts}</b>` +
+      (g ? ` · ${g.outliers.length} outliers` : ''));
     return;
   }
 
@@ -545,7 +559,7 @@ function buildDetectPanel() {
   const sliders = panel.querySelector('#dp-sliders');
   function renderSliders() {
     const method = currentMethod();
-    const base = method === 'hough' ? HOUGH_DEFAULTS : DETECT_DEFAULTS;
+    const base = method === 'hough' ? { ...HOUGH_DEFAULTS, ...VP_DEFAULTS } : DETECT_DEFAULTS;
     sliders.innerHTML = '';
     for (const p of DETECT_PARAMS) {
       if (!p.methods.includes(method)) continue;

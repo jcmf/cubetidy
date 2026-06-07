@@ -57,7 +57,9 @@ function mat3inv(M) {
 // Eigen-decomposition of a real symmetric matrix by cyclic Jacobi rotations.
 // Returns eigenvalues and eigenvectors (as rows). Used to find the null vector of
 // AᵀA in the homography DLT; n is small (9) so the O(n³)/sweep cost is irrelevant.
-function jacobiEigenSymmetric(input, maxSweeps = 100) {
+// Exported so the vanishing-point fit in lines.js can reuse it (smallest eigenvector
+// of Σ ℓℓᵀ for a family of lines).
+export function jacobiEigenSymmetric(input, maxSweeps = 100) {
   const n = input.length;
   const A = input.map((row) => row.slice());
   const V = Array.from({ length: n }, (_, i) =>

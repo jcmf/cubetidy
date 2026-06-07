@@ -8,17 +8,20 @@
 //
 //   node tools/hough-image.mjs frame.png [cannyLo=40] [houghThresh=50] [minLineLen=30] ...
 //
-// Writes annotated/<name>.hough.png next to each input (segments hue-coded by
-// orientation, matching the live overlay). Pass bg=black to draw the segments on
-// black instead of over the frame — the clearest way to judge line quality when
-// the cube itself is brightly coloured.
+// By default it also runs the vanishing-point grouping (step 1) and colours each
+// segment by family (+ VP crosshairs), matching the live method=hough overlay; pass
+// raw=1 for ungrouped orientation-hued segments instead. Writes
+// annotated/<name>.hough.png next to each input. Pass bg=black to draw on black
+// instead of over the frame — the clearest way to judge lines/grouping when the
+// cube itself is brightly coloured.
 
 import { Canvas, loadImage } from 'skia-canvas';
 import { basename, dirname, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import cv from '@techstark/opencv-js';
 import { detectLineSegments } from '../src/detect.js';
-import { drawSegments } from '../src/overlay.js';
+import { groupLineSegments } from '../src/lines.js';
+import { drawSegments, drawLineGroups } from '../src/overlay.js';
 
 await new Promise((r) => { if (cv && cv.Mat) return r(); cv.onRuntimeInitialized = r; });
 
@@ -43,8 +46,17 @@ for (const p of paths) {
 
   const segments = detectLineSegments(cv, imageData, opts);
   if (opts.bg === 'black') { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, img.width, img.height); }
-  // Thicker than the live 2px so segments stay visible when the frame is downscaled.
-  drawSegments(ctx, segments, 3);
+  // raw=1 shows ungrouped segments (orientation hue); default groups into the three
+  // vanishing-point families (step 1) and colours by family + draws VP crosshairs.
+  let info;
+  if (opts.raw) {
+    drawSegments(ctx, segments, 3); // thicker than live 2px so it survives downscaling
+    info = `${segments.length} segments`;
+  } else {
+    const g = groupLineSegments(segments, opts);
+    drawLineGroups(ctx, g);
+    info = `${segments.length} segs | families ${g.families.map((f) => f.segments.length).join('/')} | ${g.outliers.length} outliers`;
+  }
 
   const outDir = join(dirname(p), 'annotated');
   mkdirSync(outDir, { recursive: true });
@@ -64,7 +76,7 @@ for (const p of paths) {
     await zc.saveAs(join(outDir, base + '.hough.zoom.png'));
   }
 
-  console.log(`${base} ${img.width}x${img.height} | ${segments.length} segments -> annotated/${base}.hough.png`);
+  console.log(`${base} ${img.width}x${img.height} | ${info} -> annotated/${base}.hough.png`);
  } catch (err) {
   console.error(`${basename(p)}: FAILED — ${err.message || err}`);
  }
