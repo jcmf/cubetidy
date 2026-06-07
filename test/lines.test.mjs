@@ -9,7 +9,7 @@
 //
 // Run: npm test
 
-import { groupLineSegments, fitVanishingPoint, lineVPError } from '../src/lines.js';
+import { groupLineSegments, estimateRotationFromLines, fitVanishingPoint, lineVPError } from '../src/lines.js';
 import { estimateIntrinsics, project } from '../src/pose.js';
 
 let pass = 0, fail = 0;
@@ -164,6 +164,85 @@ for (const { tag, axis, angle, t } of [
   const rejected = clutterIdx.filter((i) => g.outliers.includes(segments[i])).length;
   check(`${tag}: most clutter rejected as outliers`, rejected >= clutterIdx.length * 0.6, `${rejected}/${clutterIdx.length}`);
 }
+
+// --- step 2: rotation from lines, with clutter that itself converges -----------
+
+// How well Rest matches Rtrue up to the cube's 24 symmetries: match each estimated
+// axis to the nearest true axis (by |dot|, directions are sign-free); require the
+// three to map to distinct axes. Returns the worst alignment (1 = perfect), or 0 if
+// two estimated axes collapse onto the same true axis.
+function rotAgree(Rtrue, Rest) {
+  const col = (M, j) => [M[0][j], M[1][j], M[2][j]];
+  const used = new Set();
+  let worst = 1;
+  for (let j = 0; j < 3; j++) {
+    const ce = col(Rest, j);
+    let axis = -1, dot = 0;
+    for (let k = 0; k < 3; k++) {
+      const ct = col(Rtrue, k);
+      const d = Math.abs(ce[0] * ct[0] + ce[1] * ct[1] + ce[2] * ct[2]);
+      if (d > dot) { dot = d; axis = k; }
+    }
+    if (used.has(axis)) return 0;
+    used.add(axis);
+    worst = Math.min(worst, dot);
+  }
+  return worst;
+}
+
+(() => {
+  const R = rotationAxisAngle([0.9, -1, 0.1], 1.0);
+  const t = [0.4, -0.3, 9];
+  const rand = rng(99);
+  const segments = [], kind = []; // kind: 0..2 cube axis, 'bundle', 'rand'
+
+  AXES.forEach((e, ai) => {
+    for (let m = 0; m < 12; m++) {
+      const b = [(rand() * 2 - 1) * 1.3, (rand() * 2 - 1) * 1.3, (rand() * 2 - 1) * 1.3];
+      const h = 0.3 + rand() * 0.5;
+      const p1 = project(K, { R, t }, [b[0] - e[0] * h, b[1] - e[1] * h, b[2] - e[2] * h]);
+      const p2 = project(K, { R, t }, [b[0] + e[0] * h, b[1] + e[1] * h, b[2] + e[2] * h]);
+      const j = () => (rand() - 0.5);
+      segments.push({ x1: p1[0] + j(), y1: p1[1] + j(), x2: p2[0] + j(), y2: p2[1] + j() });
+      kind.push(ai);
+    }
+  });
+
+  // A convergent BACKGROUND bundle (like the books in corner1): 14 long parallel-ish
+  // lines aimed at their own vanishing point, off in a corner — NOT orthogonal to the
+  // cube frame, so the orthogonal search must reject it rather than adopt it as an axis.
+  const bvp = [-500, 950]; // a clutter VP unrelated to the cube
+  for (let m = 0; m < 14; m++) {
+    const x = 60 + rand() * 240, y = 380 + rand() * 300;
+    const dx = bvp[0] - x, dy = bvp[1] - y, n = Math.hypot(dx, dy), L = 60 + rand() * 50;
+    segments.push({ x1: x, y1: y, x2: x + dx / n * L, y2: y + dy / n * L });
+    kind.push('bundle');
+  }
+  // A little incoherent clutter too.
+  for (let m = 0; m < 8; m++) {
+    const x = rand() * W, y = rand() * H, a = rand() * Math.PI, L = 25 + rand() * 50;
+    segments.push({ x1: x, y1: y, x2: x + Math.cos(a) * L, y2: y + Math.sin(a) * L });
+    kind.push('rand');
+  }
+
+  const est = estimateRotationFromLines(segments, K, { vpMaxErrorDeg: 3 });
+  check('rotation: estimate returned', !!est && !!est.R);
+  check('rotation: matches truth up to cube symmetry', est && rotAgree(R, est.R) > 0.99, est ? `worst=${rotAgree(R, est.R).toFixed(4)}` : 'null');
+  check('rotation: rough pose is in front of camera', est && est.pose && est.pose.t[2] > 0);
+
+  // The convergent background bundle must NOT be adopted: most of its lines are outliers.
+  if (est) {
+    const inBundle = (s) => est.families.some((f) => f.segments.includes(s));
+    let bundleInliers = 0, bundleTotal = 0;
+    segments.forEach((s, i) => { if (kind[i] === 'bundle') { bundleTotal++; if (inBundle(s)) bundleInliers++; } });
+    check('rotation: convergent clutter bundle rejected (orthogonality prior)', bundleInliers <= bundleTotal * 0.3, `${bundleInliers}/${bundleTotal} adopted`);
+
+    // ...while the real cube edges are kept.
+    let cubeInliers = 0, cubeTotal = 0;
+    segments.forEach((s, i) => { if (typeof kind[i] === 'number') { cubeTotal++; if (inBundle(s)) cubeInliers++; } });
+    check('rotation: cube edges kept as inliers', cubeInliers >= cubeTotal * 0.8, `${cubeInliers}/${cubeTotal}`);
+  }
+})();
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

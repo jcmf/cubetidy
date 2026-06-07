@@ -19,9 +19,10 @@ import { Canvas, loadImage } from 'skia-canvas';
 import { basename, dirname, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import cv from '@techstark/opencv-js';
+import { estimateIntrinsics } from '../src/pose.js';
 import { detectLineSegments } from '../src/detect.js';
-import { groupLineSegments } from '../src/lines.js';
-import { drawSegments, drawLineGroups } from '../src/overlay.js';
+import { groupLineSegments, estimateRotationFromLines } from '../src/lines.js';
+import { drawSegments, drawLineGroups, drawCubeWireframe } from '../src/overlay.js';
 
 await new Promise((r) => { if (cv && cv.Mat) return r(); cv.onRuntimeInitialized = r; });
 
@@ -46,16 +47,24 @@ for (const p of paths) {
 
   const segments = detectLineSegments(cv, imageData, opts);
   if (opts.bg === 'black') { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, img.width, img.height); }
-  // raw=1 shows ungrouped segments (orientation hue); default groups into the three
-  // vanishing-point families (step 1) and colours by family + draws VP crosshairs.
+  // raw=1: ungrouped orientation-hued segments. Otherwise run the line detector — the
+  // orthogonal-VP rotation search (step 2): colour by family + draw the orientation
+  // wireframe. group=1 forces the free step-1 grouping instead (no rotation).
   let info;
   if (opts.raw) {
     drawSegments(ctx, segments, 3); // thicker than live 2px so it survives downscaling
     info = `${segments.length} segments`;
-  } else {
+  } else if (opts.group) {
     const g = groupLineSegments(segments, opts);
     drawLineGroups(ctx, g);
     info = `${segments.length} segs | families ${g.families.map((f) => f.segments.length).join('/')} | ${g.outliers.length} outliers`;
+  } else {
+    const K = estimateIntrinsics(img.width, img.height);
+    const est = estimateRotationFromLines(segments, K, opts);
+    const g = est || groupLineSegments(segments, opts);
+    drawLineGroups(ctx, g);
+    if (est && est.pose) drawCubeWireframe(ctx, K, est.pose);
+    info = `${segments.length} segs | families ${g.families.map((f) => f.segments.length).join('/')} | ${g.outliers.length} out | ${est ? 'R found' : 'no R'}`;
   }
 
   const outDir = join(dirname(p), 'annotated');

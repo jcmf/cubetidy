@@ -52,6 +52,17 @@ const mat3vec = (M, v) => [
   M[2][0] * v[0] + M[2][1] * v[1] + M[2][2] * v[2],
 ];
 
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const norm3 = (a) => Math.hypot(a[0], a[1], a[2]);
+const normalize3 = (a) => { const n = norm3(a) || 1; return [a[0] / n, a[1] / n, a[2] / n]; };
+// K helpers (K = {f,cx,cy}). KinvV: image point/VP -> camera-frame ray direction.
+// KtL: image line -> its back-projected plane normal in camera frame (Kᵀℓ). Kd:
+// a 3D direction -> its vanishing point in the image (K·d).
+const KinvV = (K, v) => [(v[0] - K.cx * v[2]) / K.f, (v[1] - K.cy * v[2]) / K.f, v[2]];
+const KtL = (K, l) => [K.f * l[0], K.f * l[1], K.cx * l[0] + K.cy * l[1] + l[2]];
+const Kd = (K, d) => [K.f * d[0] + K.cx * d[2], K.f * d[1] + K.cy * d[2], d[2]];
+
 // Deterministic PRNG (mulberry32) so restarts — and the tests — are reproducible.
 function rng(seed) {
   let s = seed >>> 0;
@@ -251,4 +262,171 @@ export function groupLineSegments(segments, opts = {}) {
   const outliers = [];
   for (let i = 0; i < segments.length; i++) if (best.assign[i] < 0) outliers.push(segments[i]);
   return { families, outliers };
+}
+
+// --- step 2: rotation from lines (orthogonal vanishing-point search) --------
+
+export const ROT_DEFAULTS = {
+  vpMaxErrorDeg: 3,    // a line within this angle of a VP is an inlier (shared with grouping)
+  vpRansac: 600,       // RANSAC hypotheses for the orthogonal VP triple
+  vpMinLen: 14,        // only segments at least this long seed/refine the model
+};
+
+// Fit a 3D direction common to a set of image lines: the direction d most orthogonal
+// to all their back-projected plane normals n̂=normalize(Kᵀℓ) — the smallest
+// eigenvector of Σ w n̂n̂ᵀ. Unit normals keep this well-conditioned (unlike fitting a
+// VP in raw pixel coordinates), so it's what the refinement uses.
+function fitDirection(normals, weights) {
+  const M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let i = 0; i < normals.length; i++) {
+    const w = weights[i], n = normals[i];
+    for (let r = 0; r < 3; r++) for (let s = 0; s < 3; s++) M[r][s] += w * n[r] * n[s];
+  }
+  const { values, vectors } = jacobiEigenSymmetric(M);
+  let mi = 0;
+  for (let i = 1; i < 3; i++) if (values[i] < values[mi]) mi = i;
+  return vectors[mi];
+}
+
+// Assign each line to its nearest of three candidate DIRECTIONS (or outlier) and
+// report total inlier length. Error is the 3D angle between the line's back-projected
+// plane and the direction, asin|n̂·d̂| — a line truly along d lies in a plane
+// containing d, so n̂⊥d. Measuring in 3D (not the 2D midpoint→VP angle of
+// lineVPError) is distance-invariant: a far-away VP no longer loosely vacuums up
+// lines that merely point roughly toward it.
+function scoreTriple(normals, lens, dirs, maxErr) {
+  let weight = 0;
+  const assign = new Array(normals.length).fill(-1);
+  const counts = [0, 0, 0];
+  for (let i = 0; i < normals.length; i++) {
+    let best = -1, bestE = Infinity;
+    for (let c = 0; c < 3; c++) {
+      const e = Math.asin(Math.min(1, Math.abs(dot3(normals[i], dirs[c]))));
+      if (e < bestE) { bestE = e; best = c; }
+    }
+    if (bestE <= maxErr) { assign[i] = best; weight += lens[i]; counts[best]++; }
+  }
+  return { assign, weight, counts };
+}
+
+// A vanishing point at/near the principal point (direction ≈ optical axis) is a false
+// attractor: every line through the image centre is roughly consistent with it, so it
+// vacuums up support. A corner-on cube's three axes are all oblique (|d_z| ≈ 0.6), so
+// reject any frame with an axis this close to the optical axis.
+const MAX_AXIS_Z = 0.9;
+const axisDegenerate = (dirs) => dirs.some((d) => Math.abs(d[2]) > MAX_AXIS_Z);
+
+// Estimate the cube's camera rotation from Hough segments, given intrinsics K.
+//
+// A cube's three edge directions are mutually orthogonal, so their three vanishing
+// points correspond (via K) to an orthonormal frame = the rotation R. We RANSAC for
+// that frame: two lines give a first VP (direction d1); a third line, constrained to
+// be orthogonal to d1, gives d2; d3 = d1×d2. The triple explaining the most line
+// length wins, then it's refined on its inliers. Requiring orthogonality is the cube
+// prior that rejects clutter — a convergent BACKGROUND bundle (books, a shelf) won't
+// be orthogonal to the cube's other two directions, so it can't join the winning
+// frame. R is only determined up to the cube's 24 symmetries, which is irrelevant for
+// drawing an orientation (a cube looks the same under them) and is disambiguated later
+// for the solve. Also returns the families (same shape as groupLineSegments) and a
+// ROUGH pose (R + a translation guessed from the inliers' image centroid/spread) good
+// enough to overlay an orientation wireframe; metric translation comes with the PnP.
+export function estimateRotationFromLines(segments, K, opts = {}) {
+  const o = { ...ROT_DEFAULTS, ...opts };
+  if (segments.length < 6) return null;
+
+  const lines = segments.map(lineOf);                       // pixel-coordinate lines
+  const normals = lines.map((l) => normalize3(KtL(K, [l.a, l.b, l.c])));
+  const lens = lines.map((l) => l.len);
+  const maxErr = o.vpMaxErrorDeg * DEG;
+  const longIdx = lines.map((_, i) => i).filter((i) => lines[i].len >= o.vpMinLen);
+  if (longIdx.length < 4) return null;
+
+  const rand = rng(0x9e3779b1);
+  const pick = () => longIdx[(rand() * longIdx.length) | 0];
+
+  let bestDirs = null, bestWeight = -Infinity;
+  for (let it = 0; it < o.vpRansac; it++) {
+    const i1 = pick(), i2 = pick();
+    if (i1 === i2) continue;
+    const v1 = cross3([lines[i1].a, lines[i1].b, lines[i1].c], [lines[i2].a, lines[i2].b, lines[i2].c]);
+    if (norm3(v1) < 1e-9) continue;
+    const d1 = normalize3(KinvV(K, v1));
+    const i3 = pick();
+    if (i3 === i1 || i3 === i2) continue;
+    let d2 = cross3(d1, normals[i3]);          // ⊥ d1 and on line i3's plane
+    if (norm3(d2) < 1e-6) continue;
+    d2 = normalize3(d2);
+    const d3 = cross3(d1, d2);
+    const dirs0 = [d1, d2, d3];
+    if (axisDegenerate(dirs0)) continue;
+    const { weight, counts } = scoreTriple(normals, lens, dirs0, maxErr);
+    // Require all three axes to have real support, so a single attractor can't win on
+    // total weight alone — the cube shows all three edge directions corner-on.
+    if (Math.min(counts[0], counts[1], counts[2]) < 2) continue;
+    if (weight > bestWeight) { bestWeight = weight; bestDirs = dirs0; }
+  }
+  if (!bestDirs) return null;
+
+  // Refine: reassign inliers, refit each direction (3D eigen-fit), re-orthonormalize.
+  // The refit is UNGUARDED, so it can drift toward the optical-axis attractor; accept a
+  // pass only if it keeps the frame non-degenerate with all three axes supported, else
+  // keep the (balanced) RANSAC frame.
+  let dirs = bestDirs;
+  for (let pass = 0; pass < 2; pass++) {
+    const { assign } = scoreTriple(normals, lens, dirs, maxErr);
+    const refit = [];
+    const support = [0, 0, 0];
+    for (let c = 0; c < 3; c++) {
+      const ns = [], ws = [];
+      for (let i = 0; i < lines.length; i++) if (assign[i] === c && lines[i].len >= o.vpMinLen) { ns.push(normals[i]); ws.push(lines[i].len); support[c] = (support[c] || 0) + lines[i].len; }
+      refit[c] = ns.length >= 2 ? normalize3(fitDirection(ns, ws)) : dirs[c];
+    }
+    // Gram-Schmidt anchored on the best-supported axis, so noise doesn't tilt the frame.
+    const order = [0, 1, 2].sort((a, b) => support[b] - support[a]);
+    const a0 = normalize3(refit[order[0]]);
+    let a1 = refit[order[1]];
+    a1 = normalize3([a1[0] - dot3(a1, a0) * a0[0], a1[1] - dot3(a1, a0) * a0[1], a1[2] - dot3(a1, a0) * a0[2]]);
+    const a2 = cross3(a0, a1);
+    const nd = [];
+    nd[order[0]] = a0; nd[order[1]] = a1; nd[order[2]] = a2;
+    if (axisDegenerate(nd)) break;
+    const chk = scoreTriple(normals, lens, nd, maxErr);
+    if (Math.min(chk.counts[0], chk.counts[1], chk.counts[2]) < 2) break;
+    dirs = nd;
+  }
+  // Enforce a proper rotation (det +1); flipping an axis is just another symmetry.
+  if (dot3(dirs[0], cross3(dirs[1], dirs[2])) < 0) dirs[2] = [-dirs[2][0], -dirs[2][1], -dirs[2][2]];
+
+  const vps = dirs.map((d) => Kd(K, d));
+  const { assign } = scoreTriple(normals, lens, dirs, maxErr);
+  const families = [0, 1, 2].map((c) => ({ vp: vps[c], segments: [] }));
+  const outliers = [];
+  for (let i = 0; i < segments.length; i++) {
+    if (assign[i] >= 0) families[assign[i]].segments.push(segments[i]);
+    else outliers.push(segments[i]);
+  }
+  const R = [
+    [dirs[0][0], dirs[1][0], dirs[2][0]],
+    [dirs[0][1], dirs[1][1], dirs[2][1]],
+    [dirs[0][2], dirs[1][2], dirs[2][2]],
+  ];
+
+  return { R, pose: roughPose(R, families, K), families, outliers, inlierLen: bestWeight };
+}
+
+// A rough pose for the orientation overlay: keep R, and place a unit cube (edge 1) at
+// the depth/position whose projection sits at the inlier segments' image centroid with
+// a matching spread. Translation here is only a visualization aid — PnP gives the
+// metric one — so the constants just need to land the wireframe near the cube.
+function roughPose(R, families, K) {
+  const segs = families.flatMap((f) => f.segments);
+  if (segs.length < 2) return null;
+  let mx = 0, my = 0;
+  for (const s of segs) { mx += (s.x1 + s.x2) / 2; my += (s.y1 + s.y2) / 2; }
+  mx /= segs.length; my /= segs.length;
+  let rad = 0;
+  for (const s of segs) rad += Math.hypot((s.x1 + s.x2) / 2 - mx, (s.y1 + s.y2) / 2 - my);
+  rad = rad / segs.length || 1;
+  const Z = K.f * 0.6 / rad;                 // edge-1 cube; ~match the inlier spread
+  return { R, t: [(mx - K.cx) / K.f * Z, (my - K.cy) / K.f * Z, Z] };
 }

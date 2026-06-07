@@ -139,9 +139,29 @@ gaps / next steps:
     `vpIters`. Works well when the cube dominates the frame; a *convergent background
     bundle* (e.g. books) can still steal one of the 3 slots (fixed k=3) — clutter
     rejection / cube-region focus is for step 2.
-  - **Step 2 (next): VPs → rotation** (cols of R ∝ K⁻¹·vpᵢ, with the 24-orientation
-    disambiguation `cube-pose.js` already does), then recover the lattice
-    intersections and feed the existing `pose.js`/`cube-pose.js` PnP for full 6-DoF.
+  - **Step 2 (done): VPs → rotation** (`estimateRotationFromLines` in `lines.js`).
+    RANSAC for three MUTUALLY-ORTHOGONAL vanishing directions = the rotation R: two
+    lines give d1, a third (⊥ d1) gives d2, d3=d1×d2; the triple explaining the most
+    inlier line length wins, refined on its inliers. Orthogonality is the cube prior
+    that rejects clutter (a convergent background bundle isn't orthogonal to the
+    cube's other axes, so it can't join the frame) — fixes the corner1 books case.
+    Inlier error is the 3D angle between a line's back-projected plane and a direction
+    (asin|n̂·d̂|, n̂=Kᵀℓ), NOT the 2D midpoint→VP angle, which over-collects toward a
+    far VP. Two degeneracy guards matter: reject any axis within ~25° of the optical
+    axis (a VP at the principal point is a false attractor that vacuums up central
+    lines), and require all three axes to have ≥2 inliers (so a single attractor
+    can't win on total weight); the refit is re-checked against both and reverts if it
+    drifts. R is only up to the cube's 24 symmetries (fine for an orientation overlay;
+    disambiguated later for the solve). `drawCubeWireframe` (`overlay.js`) shows it at
+    a rough pose (R + translation guessed from inlier centroid/spread) — visible at
+    `?detect&method=hough`, knob `vpRansac`. KEY LIMIT (real frames): VPs need
+    perspective — works when the cube is reasonably large (corner2, solved-hand);
+    unreliable on small/distant cubes (corner1, b-series) where projection is near-
+    affine and direction depth is poorly constrained. A confidence gate is the natural
+    follow-up.
+  - **Step 3 (next): translation/scale → 6-DoF.** Recover the grid-line intersections
+    (4×4 lattice/face from the two in-plane families per face) and feed the existing
+    `pose.js`/`cube-pose.js` PnP; add a confidence gate from the PnP residual.
 - The `?detect` harness has an **on-page tuning panel** (`buildDetectPanel` in
   `main.js`, `#detect-panel` styles) so the detector's knobs are sliders + a method
   dropdown, not query-string edits. Sliders are schema-driven (`DETECT_PARAMS`,

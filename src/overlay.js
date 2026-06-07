@@ -11,6 +11,7 @@
 // A "2" suffix means the same direction, performed twice.
 
 import { FACE_DISPLAY } from './colors.js';
+import { project } from './pose.js';
 
 const ARROWS = {
   U:   { kind: 'row', i: 0, dir: 'left' },
@@ -232,6 +233,30 @@ export function drawLineGroups(ctx, grouping) {
       ctx.beginPath(); ctx.arc(vx, vy, 7, 0, Math.PI * 2); ctx.stroke();
     }
   });
+  ctx.restore();
+}
+
+// Draw a unit-cube wireframe under pose {R,t} and intrinsics K — the orientation
+// recovered from the line vanishing points (step 2). Used to eyeball that the
+// rotation is right: the wireframe edges should run parallel to the three coloured
+// segment families even when its placement is only approximate. Geometry only.
+export function drawCubeWireframe(ctx, K, pose, color = '#39ff14') {
+  const C = [];
+  for (const x of [-0.5, 0.5]) for (const y of [-0.5, 0.5]) for (const z of [-0.5, 0.5]) C.push([x, y, z]);
+  const p = C.map((X) => project(K, pose, X));
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  for (let i = 0; i < 8; i++) for (let j = i + 1; j < 8; j++) {
+    let diff = 0;
+    for (let k = 0; k < 3; k++) if (C[i][k] !== C[j][k]) diff++;
+    if (diff !== 1) continue; // cube edges connect corners differing in one coordinate
+    ctx.beginPath();
+    ctx.moveTo(p[i][0], p[i][1]);
+    ctx.lineTo(p[j][0], p[j][1]);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 

@@ -2,21 +2,21 @@ import { startCamera } from './camera.js';
 import { computeRegion, computeCornerRegion, sampleCorner, CORNER_CAPTURES } from './detection.js';
 import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
-import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawCube, drawSegments, drawLineGroups } from './overlay.js';
+import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawCube, drawSegments, drawLineGroups, drawCubeWireframe } from './overlay.js';
 import { glyphSVG } from './glyph.js';
 import { startCV, cvReady, requestDetect, latestQuads, latestSegments } from './opencv.js';
 import { findFaceGrids, fitFaceGrid } from './group.js';
 import { estimateCubePose } from './cube-pose.js';
 import { estimateIntrinsics } from './pose.js';
 import { DETECT_DEFAULTS, HOUGH_DEFAULTS } from './detect.js';
-import { groupLineSegments, VP_DEFAULTS } from './lines.js';
+import { groupLineSegments, estimateRotationFromLines, VP_DEFAULTS, ROT_DEFAULTS } from './lines.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
 // Detection runs in a worker; this is pure visualization, not wired into the
 // scan state machine yet.
 const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
-const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null, lastSegments: null, grouping: null };
+const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null, lastSegments: null, grouping: null, rot: null, K: null };
 // Every query param besides `detect` overrides a DETECT_DEFAULTS knob, so detection
 // can be tuned live from the URL without a rebuild, e.g.
 //   ?detect&method=adaptive&blockSize=51&C=7   or   ?detect&cannyLo=20&minFill=0.4
@@ -48,9 +48,10 @@ const DETECT_PARAMS = [
   { k: 'minLineLen',  label: 'Min line len',   min: 0,      max: 300, step: 1,      methods: ['hough'] },
   { k: 'minLineFrac', label: 'Min line frac',  min: 0,      max: 0.3, step: 0.005,  methods: ['hough'] },
   { k: 'maxLineGap',  label: 'Max line gap',   min: 0,      max: 50,  step: 1,      methods: ['hough'] },
-  // vanishing-point grouping (step 1 of the line-based detector)
+  // vanishing-point grouping (step 1) + orthogonal-frame rotation search (step 2)
   { k: 'vpMaxErrorDeg', label: 'VP max err°',  min: 0.5,    max: 15,  step: 0.5,    methods: ['hough'] },
   { k: 'vpIters',     label: 'VP iters',       min: 1,      max: 12,  step: 1,      methods: ['hough'] },
+  { k: 'vpRansac',    label: 'VP RANSAC',      min: 50,     max: 2000, step: 50,     methods: ['hough'] },
   // canny quad detector
   { k: 'dilateIters', label: 'Dilate iters',   min: 0,      max: 5,   step: 1,      methods: ['canny'] },
   { k: 'closeIters',  label: 'Close iters',    min: 0,      max: 5,   step: 1,      methods: ['canny'] },
@@ -180,22 +181,27 @@ function requestDetectFrame() {
 function drawDetectResults() {
   if (!cvReady()) { setDetectStatus('detect: loading OpenCV…'); return; }
 
-  // method=hough: Canny + probabilistic Hough, then group the segments into the
-  // three cube-edge families / vanishing points (step 1 of the line-based detector).
-  // Regroup only when the worker returns new segments; draw the families every frame.
+  // method=hough: Canny + probabilistic Hough, then the line-based detector. Step 2
+  // searches for three ORTHOGONAL vanishing points (= the cube rotation R), which both
+  // groups the segments and rejects clutter (a non-orthogonal background bundle can't
+  // join the frame); a green wireframe shows the recovered orientation. Falls back to
+  // the free step-1 grouping if no rotation is found. Recompute only on new segments.
   if (detectOpts.method === 'hough') {
     const segments = latestSegments();
     if (segments !== detectState.lastSegments) {
       detectState.lastSegments = segments;
-      detectState.grouping = groupLineSegments(segments, detectOpts);
+      detectState.K = estimateIntrinsics(canvas.width, canvas.height);
+      detectState.rot = estimateRotationFromLines(segments, detectState.K, detectOpts);
+      detectState.grouping = detectState.rot || groupLineSegments(segments, detectOpts);
     }
-    const g = detectState.grouping;
+    const g = detectState.grouping, r = detectState.rot;
     if (g && g.families.length) drawLineGroups(ctx, g);
     else drawSegments(ctx, segments);
+    if (r && r.pose) drawCubeWireframe(ctx, detectState.K, r.pose);
     const counts = g && g.families.length ? g.families.map((f) => f.segments.length).join('/') : '—';
     setDetectStatus(
       `detect[hough]: <b>${segments.length}</b> segs · families <b>${counts}</b>` +
-      (g ? ` · ${g.outliers.length} outliers` : ''));
+      (g ? ` · ${g.outliers.length} out` : '') + (r ? ' · <b>R found</b>' : ' · no R'));
     return;
   }
 
@@ -559,7 +565,7 @@ function buildDetectPanel() {
   const sliders = panel.querySelector('#dp-sliders');
   function renderSliders() {
     const method = currentMethod();
-    const base = method === 'hough' ? { ...HOUGH_DEFAULTS, ...VP_DEFAULTS } : DETECT_DEFAULTS;
+    const base = method === 'hough' ? { ...HOUGH_DEFAULTS, ...VP_DEFAULTS, ...ROT_DEFAULTS } : DETECT_DEFAULTS;
     sliders.innerHTML = '';
     for (const p of DETECT_PARAMS) {
       if (!p.methods.includes(method)) continue;
