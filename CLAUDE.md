@@ -183,10 +183,23 @@ gaps / next steps:
     frame fails to lock at every angle, so the sweep can't manufacture a false lock.
     Live and offline both call `solveCubeFromLines`; an explicit `vpMaxErrorDeg` from
     the panel pins the sweep to one value.
-  - **Next:** temporal smoothing of the locked pose across frames (consecutive frames
-    still differ; fuse like the quad path's `smoothCube`), then read sticker colours off
-    the grid cells to assemble the facelet string (the 24-fold R disambiguates once
-    colours are known).
+  - **Step 3b (done): temporal smoothing** (`smoothLinePose` in `lines.js`). The
+    per-frame lock is correct most frames but occasionally snaps wrong, and even correct
+    consecutive frames jitter (~±8° rotation, ~±25% depth on the close samples). The
+    smoother EMA-blends across frames but must respect the 24-fold symmetry: it
+    `canonicalizeRotation`s each new R to the symmetry representative nearest the
+    smoothed one (else blending two valid-but-different reps corrupts the pose), blends
+    if consistent (within `poseGateAngle` / `poseGateTrans`), and REJECTS jumps — the
+    intermittent wrong locks — unless a new pose persists `poseReacquire` updates (a real
+    move). Holds through `poseMaxMiss` lock-less updates. `CUBE_ROTATIONS`,
+    `canonicalizeRotation`, `rotationAngleDeg`, `blendRotation` are the pure pieces;
+    `smoothLinePose` is pure too (state in/out) and tested with a synthetic sequence
+    (holds through wrong locks, re-acquires on a sustained move, releases on dropout).
+    Panel knobs: `poseAlpha` / `poseGateAngle` / `poseReacquire`. NOTE: depth is the
+    weakest-constrained DOF (±25% frame-to-frame) — EMA damps it; a future refinement
+    could constrain scale better. Verify the live overlay is steady on a close cube.
+  - **Next:** read sticker colours off the locked grid cells to assemble the facelet
+    string (the 24-fold R disambiguates once colours are known).
 - The `?detect` harness has an **on-page tuning panel** (`buildDetectPanel` in
   `main.js`, `#detect-panel` styles) so the detector's knobs are sliders + a method
   dropdown, not query-string edits. Sliders are schema-driven (`DETECT_PARAMS`,

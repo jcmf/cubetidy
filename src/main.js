@@ -9,14 +9,14 @@ import { findFaceGrids, fitFaceGrid } from './group.js';
 import { estimateCubePose } from './cube-pose.js';
 import { estimateIntrinsics } from './pose.js';
 import { DETECT_DEFAULTS, HOUGH_DEFAULTS } from './detect.js';
-import { groupLineSegments, solveCubeFromLines, VP_DEFAULTS, ROT_DEFAULTS, POSE_DEFAULTS } from './lines.js';
+import { groupLineSegments, solveCubeFromLines, smoothLinePose, VP_DEFAULTS, ROT_DEFAULTS, POSE_DEFAULTS, POSE_SMOOTH_DEFAULTS } from './lines.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
 // Detection runs in a worker; this is pure visualization, not wired into the
 // scan state machine yet.
 const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
-const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null, lastSegments: null, grouping: null, sol: null, K: null };
+const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null, lastSegments: null, grouping: null, sol: null, smoothPose: null, K: null };
 // Every query param besides `detect` overrides a DETECT_DEFAULTS knob, so detection
 // can be tuned live from the URL without a rebuild, e.g.
 //   ?detect&method=adaptive&blockSize=51&C=7   or   ?detect&cannyLo=20&minFill=0.4
@@ -55,6 +55,10 @@ const DETECT_PARAMS = [
   // metric pose + confidence gate (step 3)
   { k: 'minCorr',     label: 'Min corners',    min: 4,      max: 30,  step: 1,      methods: ['hough'] },
   { k: 'maxReprojFrac', label: 'Max reproj',   min: 0.02,   max: 0.3, step: 0.01,   methods: ['hough'] },
+  // temporal smoothing of the locked pose (step 3b)
+  { k: 'poseAlpha',   label: 'Smooth α',       min: 0.1,    max: 1,   step: 0.05,   methods: ['hough'] },
+  { k: 'poseGateAngle', label: 'Jump gate°',   min: 5,      max: 45,  step: 1,      methods: ['hough'] },
+  { k: 'poseReacquire', label: 'Reacquire',    min: 1,      max: 15,  step: 1,      methods: ['hough'] },
   // canny quad detector
   { k: 'dilateIters', label: 'Dilate iters',   min: 0,      max: 5,   step: 1,      methods: ['canny'] },
   { k: 'closeIters',  label: 'Close iters',    min: 0,      max: 5,   step: 1,      methods: ['canny'] },
@@ -199,17 +203,22 @@ function drawDetectResults() {
       detectState.K = estimateIntrinsics(canvas.width, canvas.height);
       detectState.sol = solveCubeFromLines(segments, detectState.K, detectOpts);
       detectState.grouping = detectState.sol ? detectState.sol.rot : groupLineSegments(segments, detectOpts);
+      // Temporally fuse the locked pose (reject the intermittent wrong locks, hold
+      // through dropouts) so the overlay is steady instead of flickering right/wrong.
+      const locked = detectState.sol && detectState.sol.pose && detectState.sol.pose.locked ? detectState.sol.pose : null;
+      detectState.smoothPose = smoothLinePose(detectState.smoothPose, locked, detectOpts);
     }
-    const g = detectState.grouping, sol = detectState.sol, P = sol && sol.pose;
+    const g = detectState.grouping, sol = detectState.sol, sm = detectState.smoothPose;
     if (g && g.families.length) drawLineGroups(ctx, g);
     else drawSegments(ctx, segments);
-    if (P && P.locked) drawCubeWireframe(ctx, detectState.K, P.pose, '#39ff14');
+    if (sm) drawCubeWireframe(ctx, detectState.K, sm, '#39ff14');
     else if (sol && sol.rot.pose) drawCubeWireframe(ctx, detectState.K, sol.rot.pose, 'rgba(150,160,175,0.55)');
     const counts = g && g.families.length ? g.families.map((f) => f.segments.length).join('/') : '—';
+    const instant = sol && sol.pose && sol.pose.locked;
     setDetectStatus(
       `detect[hough]: <b>${segments.length}</b> segs · families <b>${counts}</b>` +
-      (P && P.locked ? ` · <b>LOCK</b> ${P.count}pts ${P.reprojErr.toFixed(1)}px`
-        : sol ? ' · R only (low conf)' : ' · no R'));
+      (sm ? ` · <b>LOCK</b>${instant ? ` ${sol.pose.count}pts ${sol.pose.reprojErr.toFixed(1)}px` : ' (held)'}`
+        : sol ? ' · searching' : ' · no R'));
     return;
   }
 
@@ -573,7 +582,7 @@ function buildDetectPanel() {
   const sliders = panel.querySelector('#dp-sliders');
   function renderSliders() {
     const method = currentMethod();
-    const base = method === 'hough' ? { ...HOUGH_DEFAULTS, ...VP_DEFAULTS, ...ROT_DEFAULTS, ...POSE_DEFAULTS } : DETECT_DEFAULTS;
+    const base = method === 'hough' ? { ...HOUGH_DEFAULTS, ...VP_DEFAULTS, ...ROT_DEFAULTS, ...POSE_DEFAULTS, ...POSE_SMOOTH_DEFAULTS } : DETECT_DEFAULTS;
     sliders.innerHTML = '';
     for (const p of DETECT_PARAMS) {
       if (!p.methods.includes(method)) continue;

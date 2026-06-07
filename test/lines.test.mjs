@@ -9,8 +9,18 @@
 //
 // Run: npm test
 
-import { groupLineSegments, estimateRotationFromLines, recoverCubePose, solveCubeFromLines, fitVanishingPoint, lineVPError } from '../src/lines.js';
+import {
+  groupLineSegments, estimateRotationFromLines, recoverCubePose, solveCubeFromLines,
+  fitVanishingPoint, lineVPError,
+  smoothLinePose, canonicalizeRotation, rotationAngleDeg, CUBE_ROTATIONS,
+} from '../src/lines.js';
 import { estimateIntrinsics, project } from '../src/pose.js';
+
+const mat3mul = (A, B) => {
+  const C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) C[i][j] = A[i][0] * B[0][j] + A[i][1] * B[1][j] + A[i][2] * B[2][j];
+  return C;
+};
 
 let pass = 0, fail = 0;
 function check(name, cond, extra = '') {
@@ -311,6 +321,59 @@ function cubeGridSegments(R, t, rand) {
   const rot = estimateRotationFromLines(segments, K, {});
   const est = rot && recoverCubePose(rot, K, {});
   check('pose: clutter-only scene does not lock', !est || !est.locked, est ? `count=${est.count} err=${est.reprojErr.toFixed(2)}` : 'no rot');
+})();
+
+// --- temporal smoothing (24-fold-symmetry aware) -------------------------------
+
+(() => {
+  check('cube symmetry group has 24 proper rotations', CUBE_ROTATIONS.length === 24);
+  check('cube rotations are proper & orthonormal', CUBE_ROTATIONS.every((M) => {
+    const det = M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+    return Math.abs(det - 1) < 1e-9;
+  }));
+
+  const R = rotationAxisAngle([0.3, 1, 0.2], 0.7);
+  const Rs = mat3mul(R, CUBE_ROTATIONS[9]);   // a symmetry-equivalent representation
+  // acos near 1 amplifies float error, so these "~0" angles ride at ~1e-3°, not 1e-9.
+  check('canonicalize aligns a symmetry variant to the reference', rotationAngleDeg(R, canonicalizeRotation(Rs, R)) < 0.01, `ang=${rotationAngleDeg(R, canonicalizeRotation(Rs, R))}`);
+  check('rotationAngleDeg ~0 for identical rotations', rotationAngleDeg(R, R) < 0.01);
+})();
+
+(() => {
+  const truth = rotationAxisAngle([0.2, 1, 0.1], 0.6), t = [0.3, -0.2, 9];
+  const opts = { poseAlpha: 0.5, poseReacquire: 4, poseGateAngle: 22 };
+  const rand = rng(3);
+  const smallRot = () => rotationAxisAngle([rand() - 0.5, rand() - 0.5, rand() - 0.5], (rand() - 0.5) * 0.05); // ~1.5°
+  const wrong = mat3mul(rotationAxisAngle([1, 0.3, 0.2], 0.7), truth); // ~40° off, not a symmetry
+
+  check('smoothing precondition: the wrong pose is outside the gate',
+    rotationAngleDeg(truth, canonicalizeRotation(wrong, truth)) > 22);
+
+  let st = smoothLinePose(null, { R: truth, t }, opts);  // seed
+  for (let i = 0; i < 24; i++) {
+    let P;
+    if (i % 4 === 2) P = { R: wrong, t };                                   // intermittent wrong lock
+    else {
+      const S = CUBE_ROTATIONS[(rand() * 24) | 0];                          // a random symmetry rep
+      P = { R: mat3mul(smallRot(), mat3mul(truth, S)), t: t.map((v) => v + (rand() - 0.5) * 0.02) };
+    }
+    st = smoothLinePose(st, P, opts);
+  }
+  check('smoothing: holds the correct pose through intermittent wrong locks',
+    rotationAngleDeg(truth, canonicalizeRotation(st.R, truth)) < 8, `ang=${rotationAngleDeg(truth, canonicalizeRotation(st.R, truth)).toFixed(1)}`);
+
+  // A sustained reorientation should be followed (re-acquire).
+  const moved = rotationAxisAngle([0.2, 1, 0.1], 1.2);
+  for (let i = 0; i < 6; i++) st = smoothLinePose(st, { R: moved, t }, opts);
+  check('smoothing: re-acquires after a sustained real move',
+    rotationAngleDeg(moved, canonicalizeRotation(st.R, moved)) < 8, `ang=${rotationAngleDeg(moved, canonicalizeRotation(st.R, moved)).toFixed(1)}`);
+
+  // Dropouts: hold briefly, then release.
+  let s2 = smoothLinePose(null, { R: truth, t }, opts);
+  for (let i = 0; i < 3; i++) s2 = smoothLinePose(s2, null, opts);
+  check('smoothing: holds through brief dropouts', !!s2);
+  for (let i = 0; i < 20; i++) s2 = smoothLinePose(s2, null, opts);
+  check('smoothing: releases after a sustained dropout', s2 === null);
 })();
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -632,3 +632,112 @@ export function solveCubeFromLines(segments, K, opts = {}) {
   }
   return best;
 }
+
+// --- temporal smoothing of the locked pose (24-fold-symmetry aware) ---------
+
+// The per-frame lock is correct most frames but occasionally snaps to a wrong pose,
+// so the overlay jitters between right and wrong. Smoothing fixes it — but a cube's
+// rotation is only defined up to its 24 symmetries, so two *correct* consecutive
+// frames can report numerically different R's; blending them naively would corrupt the
+// pose. So: align each new R to the symmetry representative nearest the smoothed one,
+// EMA-blend if it's consistent, and REJECT jumps (the wrong locks) — unless a new pose
+// persists for a few frames, which means a real move and re-acquires.
+
+export const POSE_SMOOTH_DEFAULTS = {
+  poseAlpha: 0.4,        // EMA weight toward each accepted estimate (lower = steadier)
+  poseMaxMiss: 8,        // hold the last pose through this many lock-less updates
+  poseGateAngle: 22,     // a new pose >this° (after symmetry alignment) from the smoothed one is a jump
+  poseGateTrans: 0.3,    // ...or whose centre moved >this × depth
+  poseReacquire: 5,      // a jump sustained this many updates = a real move → re-acquire
+};
+
+// The 24 proper rotations of a cube: signed 3×3 permutation matrices with det +1. A
+// geometric cube is identical under these, so a recovered R is only defined up to one.
+export const CUBE_ROTATIONS = (() => {
+  const perms = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+  const out = [];
+  for (const p of perms) for (let s = 0; s < 8; s++) {
+    const sg = [(s & 1) ? -1 : 1, (s & 2) ? -1 : 1, (s & 4) ? -1 : 1];
+    const M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (let r = 0; r < 3; r++) M[r][p[r]] = sg[r];
+    const det = M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+    if (det > 0) out.push(M);
+  }
+  return out;
+})();
+
+const matMul3 = (A, B) => {
+  const C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) C[i][j] = A[i][0] * B[0][j] + A[i][1] * B[1][j] + A[i][2] * B[2][j];
+  return C;
+};
+const frob = (A, B) => { let s = 0; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) s += A[i][j] * B[i][j]; return s; };
+
+// The cube-symmetry representative of R closest to ref (max trace(refᵀ·R·S) over the
+// 24 symmetries S), so two representatives of the same orientation line up before EMA.
+export function canonicalizeRotation(R, ref) {
+  let best = R, bestScore = -Infinity;
+  for (const S of CUBE_ROTATIONS) {
+    const cand = matMul3(R, S);
+    const score = frob(ref, cand);
+    if (score > bestScore) { bestScore = score; best = cand; }
+  }
+  return best;
+}
+
+// Geodesic angle (degrees) between two rotations: acos((trace(AᵀB)−1)/2).
+export function rotationAngleDeg(A, B) {
+  return Math.acos(Math.max(-1, Math.min(1, (frob(A, B) - 1) / 2))) * 180 / Math.PI;
+}
+
+// Blend A toward B by alpha and re-orthonormalize (Gram-Schmidt) to a valid rotation.
+// Only meaningful for nearby A,B (smoothing blends gated-consistent rotations).
+export function blendRotation(A, B, alpha) {
+  const M = A.map((row, i) => row.map((v, j) => v + alpha * (B[i][j] - v)));
+  const col = (j) => [M[0][j], M[1][j], M[2][j]];
+  const nrm = (v) => { const n = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / n, v[1] / n, v[2] / n]; };
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const c0 = nrm(col(0));
+  let c1 = col(1); c1 = nrm([c1[0] - dot(c1, c0) * c0[0], c1[1] - dot(c1, c0) * c0[1], c1[2] - dot(c1, c0) * c0[2]]);
+  const c2 = cross(c0, c1);
+  return [[c0[0], c1[0], c2[0]], [c0[1], c1[1], c2[1]], [c0[2], c1[2], c2[2]]];
+}
+
+// Is pose (R,t) consistent with reference (refR,refT)? Aligns R to the nearest
+// symmetry rep of refR first, then checks the rotation angle and centre shift.
+function poseConsistent(refR, refT, R, t, o) {
+  const Rc = canonicalizeRotation(R, refR);
+  const ang = rotationAngleDeg(refR, Rc);
+  const dt = Math.hypot(t[0] - refT[0], t[1] - refT[1], t[2] - refT[2]) / (Math.abs(refT[2]) || 1);
+  return { ok: ang <= o.poseGateAngle && dt <= o.poseGateTrans, Rc };
+}
+
+// One temporal-smoothing update. `prev` is the smoother state (or null), `P` the new
+// locked pose {R,t} (or null when this frame didn't lock), `opts` overrides the
+// defaults. Returns the new state { R, t, miss, reject, cand }. Pure → testable with a
+// synthetic pose sequence.
+export function smoothLinePose(prev, P, opts = {}) {
+  const o = { ...POSE_SMOOTH_DEFAULTS, ...opts };
+  if (!P) {  // no lock this update — hold the last pose through brief dropouts
+    if (prev && prev.miss < o.poseMaxMiss) return { ...prev, miss: prev.miss + 1 };
+    return null;
+  }
+  if (!prev) return { R: P.R, t: P.t.slice(), miss: 0, reject: 0, cand: null };
+
+  const c = poseConsistent(prev.R, prev.t, P.R, P.t, o);
+  if (c.ok) {
+    return {
+      R: blendRotation(prev.R, c.Rc, o.poseAlpha),
+      t: prev.t.map((v, i) => v + o.poseAlpha * (P.t[i] - v)),
+      miss: 0, reject: 0, cand: null,
+    };
+  }
+  // A jump: keep holding the smoothed pose, but track whether the NEW pose persists
+  // (consecutive mutually-consistent jumps = a real move) before re-acquiring; this is
+  // what ignores scattered wrong locks while still following a genuine reorientation.
+  const sustained = prev.cand && poseConsistent(prev.cand.R, prev.cand.t, P.R, P.t, o).ok;
+  const cand = { R: P.R, t: P.t.slice(), n: sustained ? prev.cand.n + 1 : 1 };
+  if (cand.n >= o.poseReacquire) return { R: P.R, t: P.t.slice(), miss: 0, reject: 0, cand: null };
+  return { R: prev.R, t: prev.t, miss: 0, reject: (prev.reject || 0) + 1, cand };
+}
