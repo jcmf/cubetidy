@@ -195,9 +195,22 @@ gaps / next steps:
     `canonicalizeRotation`, `rotationAngleDeg`, `blendRotation` are the pure pieces;
     `smoothLinePose` is pure too (state in/out) and tested with a synthetic sequence
     (holds through wrong locks, re-acquires on a sustained move, releases on dropout).
-    Panel knobs: `poseAlpha` / `poseGateAngle` / `poseReacquire`. NOTE: depth is the
-    weakest-constrained DOF (±25% frame-to-frame) — EMA damps it; a future refinement
-    could constrain scale better. Verify the live overlay is steady on a close cube.
+    Panel knobs: `poseAlpha` / `poseGateAngle` / `poseReacquire`.
+  - **Step 3c (done): kill the scale/position aliasing.** The lock was right-angle but
+    wrong-size/position and flickered, because the 3×3 grid is PERIODIC: a ⅔-scaled /
+    cell-shifted cube reprojects nearly as well, and `refinePnP` (minimizing corner
+    reprojection) actively PREFERS the too-small alias regardless of where it starts (a
+    grid-match depth scan flickered between aliases frame to frame). Fix: the detected
+    line field's overall EXTENT is alias-free, so PIN scale to it — after each PnP step,
+    scale `t` along its ray so the projected cube spans the detected lines. Scaling `t`
+    along its own ray leaves the projected CENTRE fixed and only changes apparent SIZE,
+    so PnP still refines rotation + image-position freely while scale can't drift to an
+    alias. Extent is measured on the visible-face grid-line endpoints (what the detected
+    lines are), with a ROBUST bbox (median centre, drop endpoints beyond 3× the median
+    radius) — a few clutter lines that slip into a family would otherwise blow a plain
+    bbox up ~4× and place the cube wildly wrong. Result: depth is stable across
+    consecutive frames (close1-3 all lock at Z≈2.5, extent ratio ~1) and the overlay
+    fits. Verify live steadiness on a close cube.
   - **Next:** read sticker colours off the locked grid cells to assemble the facelet
     string (the 24-fold R disambiguates once colours are known).
 - The `?detect` harness has an **on-page tuning panel** (`buildDetectPanel` in
