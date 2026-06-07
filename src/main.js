@@ -10,20 +10,28 @@ import { estimateCubePose } from './cube-pose.js';
 import { estimateIntrinsics } from './pose.js';
 import { DETECT_DEFAULTS, HOUGH_DEFAULTS } from './detect.js';
 import { groupLineSegments, solveCubeFromLines, smoothLinePose, VP_DEFAULTS, ROT_DEFAULTS, POSE_DEFAULTS, POSE_SMOOTH_DEFAULTS } from './lines.js';
+import { buildCubeScene, drawScene } from './synth.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
 // Detection runs in a worker; this is pure visualization, not wired into the
 // scan state machine yet.
 const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
+// ?synth: render a synthetic cube (KNOWN pose/colours) into the canvas in place of
+// the camera — an in-page test-image generator you can eyeball, tune, and save.
+// Composable with the detector: a "Run line detector" toggle (or ?synth&detect)
+// overlays the REAL hough pipeline on the generated frame, so you watch it lock onto
+// a known pose. The scene/draw core is shared with the node CLI via src/synth.js.
+const DEBUG_SYNTH = new URLSearchParams(location.search).has('synth');
 const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null, lastSegments: null, grouping: null, sol: null, smoothPose: null, K: null };
-// Every query param besides `detect` overrides a DETECT_DEFAULTS knob, so detection
-// can be tuned live from the URL without a rebuild, e.g.
+// Every query param besides the mode flags overrides a DETECT_DEFAULTS knob, so
+// detection can be tuned live from the URL without a rebuild, e.g.
 //   ?detect&method=adaptive&blockSize=51&C=7   or   ?detect&cannyLo=20&minFill=0.4
+const MODE_FLAGS = new Set(['detect', 'synth', 'runDetect']);
 const detectOpts = (() => {
   const o = {};
   for (const [k, v] of new URLSearchParams(location.search)) {
-    if (k === 'detect') continue;
+    if (MODE_FLAGS.has(k)) continue;
     o[k] = /^-?\d*\.?\d+$/.test(v) ? parseFloat(v) : v;
   }
   return o;
@@ -33,6 +41,37 @@ const detectOpts = (() => {
 // shipped to the worker, but it still round-trips through the URL like the rest.
 const detectDisplay = { hideCamera: false };
 if ('hideCamera' in detectOpts) { detectDisplay.hideCamera = !!detectOpts.hideCamera; delete detectOpts.hideCamera; }
+
+// ?synth state. synthOpts holds the scene + appearance knobs (any URL param besides
+// the mode flags), merged over SYNTH_DEFAULTS each frame so untouched DOFs keep their
+// defaults (esp. the rotation axis — a single touched axis slider mustn't zero the
+// other two). runDetect overlays the line detector (implied by ?synth&detect).
+const synthOpts = (() => {
+  const o = {};
+  for (const [k, v] of new URLSearchParams(location.search)) {
+    if (MODE_FLAGS.has(k)) continue;
+    o[k] = /^-?\d*\.?\d+$/.test(v) ? parseFloat(v) : v;
+  }
+  return o;
+})();
+const synthDisplay = { runDetect: DEBUG_SYNTH && (new URLSearchParams(location.search).has('runDetect') || DEBUG_DETECT) };
+const synthState = { scene: null };
+const SYNTH_DEFAULTS = { angleDeg: 57, axisX: 0.9, axisY: -1, axisZ: 0.1, dist: 6, tx: 0, ty: 0, gap: 0.1, blur: 0, noise: 0, scramble: 0 };
+// Slider schema for the ?synth panel (bounds only; values come from SYNTH_DEFAULTS).
+const SYNTH_PARAMS = [
+  { k: 'angleDeg', label: 'Angle°',    min: 0,  max: 180, step: 1 },
+  { k: 'axisX',    label: 'Axis X',    min: -1, max: 1,   step: 0.05 },
+  { k: 'axisY',    label: 'Axis Y',    min: -1, max: 1,   step: 0.05 },
+  { k: 'axisZ',    label: 'Axis Z',    min: -1, max: 1,   step: 0.05 },
+  { k: 'dist',     label: 'Distance',  min: 3,  max: 12,  step: 0.1 },
+  { k: 'tx',       label: 'Offset X',  min: -2, max: 2,   step: 0.05 },
+  { k: 'ty',       label: 'Offset Y',  min: -2, max: 2,   step: 0.05 },
+  { k: 'gap',      label: 'Sticker gap', min: 0, max: 0.3, step: 0.01 },
+  { k: 'blur',     label: 'Blur px',   min: 0,  max: 8,   step: 0.5 },
+  { k: 'noise',    label: 'Noise',     min: 0,  max: 40,  step: 1 },
+  { k: 'scramble', label: 'Scramble seed', min: 0, max: 60, step: 1 },
+];
+if (DEBUG_SYNTH && synthDisplay.runDetect) detectOpts.method = 'hough';
 
 // Schema for the on-page tuning panel: every numeric detector knob with its slider
 // bounds and which method(s) it applies to (only the active method's knobs show).
@@ -135,6 +174,7 @@ const state = {
 // --- render loop -----------------------------------------------------------
 
 function render() {
+  if (DEBUG_SYNTH) { renderSynth(); requestAnimationFrame(render); return; }
   if (video.videoWidth && video.videoHeight) {
     if (canvas.width !== video.videoWidth) {
       canvas.width = video.videoWidth;
@@ -170,6 +210,53 @@ function render() {
     if (DEBUG_DETECT) drawDetectResults();
   }
   requestAnimationFrame(render);
+}
+
+// --- ?synth: in-page synthetic test-image generator -------------------------
+
+// Effective scene/appearance opts: defaults under the live overrides.
+const synthEffective = () => ({ ...SYNTH_DEFAULTS, ...synthOpts });
+
+// Build + draw the synthetic cube into the canvas each frame. When runDetect is on,
+// the freshly-drawn (overlay-free) frame is sampled for the detector and the hough
+// wireframe is overlaid on top — letting you watch the real detector lock onto a
+// KNOWN pose. K matches buildCubeScene's (same default fov), so it sees true ground truth.
+function renderSynth() {
+  const o = synthEffective();
+  const W = +o.width || 1280, H = +o.height || 720;
+  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+  const scene = buildCubeScene({ width: W, height: H, ...o });
+  drawScene(ctx, scene, o);
+  synthState.scene = scene;
+  if (synthDisplay.runDetect) {
+    requestDetectFrame();  // samples the clean synthetic frame (no overlays drawn yet)
+    drawDetectResults();   // overlays the hough grouping + wireframe + status
+  } else {
+    setDetectStatus(`synth: faces <b>${scene.truth.visibleFaces.map((f) => f.letter).join('')}</b> · `
+      + `${scene.truth.angleDeg.toFixed(0)}° · dist ${scene.truth.dist} · edge ${scene.truth.edgePx.toFixed(0)}px`);
+  }
+}
+
+// Download a data URL as a file, inside the current user gesture (sync, so the
+// browser doesn't block the download — same trick as captureFrame).
+function downloadDataURL(href, name) {
+  const a = document.createElement('a');
+  a.href = href; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+// Save the CLEAN generated frame (re-rendered without any detector overlay) + its
+// ground-truth JSON, the browser-side equivalent of the node CLI's PNG + .truth.json.
+function saveSynth() {
+  const o = synthEffective();
+  const W = canvas.width, H = canvas.height;
+  const scene = buildCubeScene({ width: W, height: H, ...o });
+  const off = document.createElement('canvas'); off.width = W; off.height = H;
+  drawScene(off.getContext('2d'), scene, o);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  downloadDataURL(off.toDataURL('image/png'), `synth-${stamp}.png`);
+  downloadDataURL('data:application/json,' + encodeURIComponent(JSON.stringify(scene.truth, null, 2)), `synth-${stamp}.truth.json`);
+  console.log(`[synth] saved synth-${stamp}.png (${W}x${H}) + truth JSON`);
 }
 
 // Ship the clean frame to the detection worker every few frames (it reads the
@@ -524,7 +611,10 @@ function captureFrame() {
   a.remove();
   console.log(`[capture] saved ${a.download} (${off.width}x${off.height})`);
 }
-if (DEBUG_DETECT) {
+// The live-camera detect harness. Skipped under ?synth — there the synthetic frame
+// is the source and the synth panel owns the page (its "Run line detector" toggle
+// drives the overlay), so a second panel / camera-capture button would only conflict.
+if (DEBUG_DETECT && !DEBUG_SYNTH) {
   const btn = document.createElement('button');
   btn.textContent = '📷 Save frame';
   btn.style.cssText = 'position:fixed;left:8px;bottom:84px;z-index:1000;padding:10px 14px;' +
@@ -539,6 +629,15 @@ if (DEBUG_DETECT) {
   // mirror toggle moves into the panel.
   els.glyph.style.display = 'none';
   els.mirror.style.display = 'none';
+}
+
+if (DEBUG_SYNTH) {
+  canvas.classList.remove('mirrored'); // the generated frame IS the saved image — don't flip it
+  els.glyph.style.display = 'none';
+  els.mirror.style.display = 'none';
+  els.primary.hidden = true;
+  buildSynthPanel();
+  console.log('[synth] generator ON; opts =', synthOpts, synthDisplay.runDetect ? '(detector overlay on)' : '');
 }
 
 // Number of decimal places implied by a slider step (2 -> 0, 0.005 -> 3). A
@@ -564,6 +663,7 @@ function syncDetectURL() {
 function buildDetectPanel() {
   const panel = document.createElement('div');
   panel.id = 'detect-panel';
+  panel.className = 'tune-panel';
   panel.innerHTML = `
     <h2>detect tuning</h2>
     <div class="dp-row">
@@ -628,6 +728,78 @@ function buildDetectPanel() {
   renderSliders();
 }
 
+// Reflect the live synth tuning back into the URL (so reload / a copied link restores
+// it), preserving any non-synth params already there — e.g. detector knobs when the
+// overlay is on. Only overridden knobs land in the URL, keeping it compact.
+function syncSynthURL() {
+  const params = new URLSearchParams(location.search);
+  for (const p of SYNTH_PARAMS) params.delete(p.k);
+  params.set('synth', '');
+  for (const p of SYNTH_PARAMS) if (p.k in synthOpts) params.set(p.k, String(synthOpts[p.k]));
+  if (synthDisplay.runDetect) params.set('runDetect', '1'); else params.delete('runDetect');
+  history.replaceState(null, '', location.pathname + '?' + params.toString());
+}
+
+// Build the on-page ?synth panel: a slider per pose/appearance knob, a Run-detector
+// toggle, and Save (PNG + truth JSON) / Reset buttons. Sliders mutate synthOpts in
+// place — renderSynth reads it every frame — and mirror into the URL.
+function buildSynthPanel() {
+  const panel = document.createElement('div');
+  panel.id = 'synth-panel';
+  panel.className = 'tune-panel';
+  panel.innerHTML = `
+    <h2>synth generator</h2>
+    <label class="dp-toggle"><input type="checkbox" id="sp-detect"> Run line detector</label>
+    <div id="sp-sliders"></div>
+    <div class="sp-actions">
+      <button id="sp-save" type="button">💾 Save PNG + JSON</button>
+      <button id="sp-reset" type="button">Reset to defaults</button>
+    </div>`;
+  document.body.appendChild(panel);
+
+  const sliders = panel.querySelector('#sp-sliders');
+  for (const p of SYNTH_PARAMS) {
+    const dec = stepDecimals(p.step);
+    const value = synthOpts[p.k] ?? SYNTH_DEFAULTS[p.k] ?? 0;
+    const row = document.createElement('div');
+    row.className = 'dp-slider';
+    row.dataset.k = p.k;
+    row.innerHTML = `<label><span>${p.label}</span><span class="dp-val">${Number(value).toFixed(dec)}</span></label>`;
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = p.min; input.max = p.max; input.step = p.step; input.value = value;
+    const val = row.querySelector('.dp-val');
+    input.addEventListener('input', () => {
+      const v = parseFloat(input.value);
+      synthOpts[p.k] = v;
+      val.textContent = v.toFixed(dec);
+      syncSynthURL();
+    });
+    row.appendChild(input);
+    sliders.appendChild(row);
+  }
+
+  const detect = panel.querySelector('#sp-detect');
+  detect.checked = synthDisplay.runDetect;
+  detect.addEventListener('change', () => {
+    synthDisplay.runDetect = detect.checked;
+    if (detect.checked) { detectOpts.method = 'hough'; startCV(); } // safe to call repeatedly
+    syncSynthURL();
+  });
+
+  panel.querySelector('#sp-save').addEventListener('click', saveSynth);
+  panel.querySelector('#sp-reset').addEventListener('click', () => {
+    for (const p of SYNTH_PARAMS) delete synthOpts[p.k];
+    for (const row of sliders.querySelectorAll('.dp-slider')) {
+      const p = SYNTH_PARAMS.find((q) => q.k === row.dataset.k);
+      const input = row.querySelector('input'), span = row.querySelector('.dp-val');
+      input.value = SYNTH_DEFAULTS[p.k] ?? 0;
+      span.textContent = Number(input.value).toFixed(stepDecimals(p.step));
+    }
+    syncSynthURL();
+  });
+}
+
 els.next.addEventListener('click', () => step(1));
 els.prev.addEventListener('click', () => step(-1));
 els.reset.addEventListener('click', () => enterScanning());
@@ -641,10 +813,11 @@ els.perspective.addEventListener('input', () => {
   state.persp = parseFloat(els.perspective.value);
 });
 
-showButtons({ primary: 'Start camera' });
+if (!DEBUG_SYNTH) showButtons({ primary: 'Start camera' });
 requestAnimationFrame(render);
 
 // Spin up the OpenCV worker once the first frame has painted: the ~10 MB load
 // and WASM init happen off the main thread, so they're ready by scan time without
-// ever freezing the UI. No user action needed.
-requestAnimationFrame(() => requestAnimationFrame(() => startCV()));
+// ever freezing the UI. No user action needed. Skipped in pure ?synth (no detector
+// overlay) — nothing needs OpenCV there.
+if (!DEBUG_SYNTH || synthDisplay.runDetect) requestAnimationFrame(() => requestAnimationFrame(() => startCV()));

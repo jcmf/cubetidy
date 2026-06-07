@@ -128,16 +128,23 @@ gaps / next steps:
   `{type:'segments'}` for hough vs `{type:'quads'}`. `tools/hough-image.mjs` renders
   the same pipeline on a still frame (`bg=black` to hide the cube, `raw=1` for
   ungrouped segments).
-  - **Synthetic ground truth** (`tools/synth-cube.mjs`, `npm run synth`): renders a
-    cube at a CHOSEN 6-DoF pose to a PNG + a `.truth.json` sidecar (the known pose,
-    `K`, per-sticker colours, projected corners/cells), reusing the detector's own
-    `project()`/`GRID_OFFSETS` so image and truth can't drift. This is how the PIXEL
-    layer gets an offline test it otherwise can't have: real `samples/` frames have no
-    ground truth. `tools/synth-smoke.mjs` (`npm run synth:check`) renders several poses,
-    runs the REAL `detectLineSegments`→`solveCubeFromLines`, and grades the recovered
-    pose against truth (lock + rotation mod the 24 symmetries + centre + depth). Loads
-    the OpenCV WASM, so like `detect-smoke` it is NOT part of `npm test`. Outputs go to
-    `samples/synth/` (git-ignored); `hough-image.mjs` points straight at them.
+  - **Synthetic ground truth** (`src/synth.js` core; `tools/synth-cube.mjs`,
+    `npm run synth`): builds a cube at a CHOSEN 6-DoF pose and draws it, reusing the
+    detector's own `project()`/`GRID_OFFSETS` so image and truth can't drift. The CLI
+    writes a PNG + a `.truth.json` sidecar (the known pose, `K`, per-sticker colours,
+    projected corners/cells). This is how the PIXEL layer gets an offline test it
+    otherwise can't have: real `samples/` frames have no ground truth.
+    `tools/synth-smoke.mjs` (`npm run synth:check`) renders several poses, runs the
+    REAL `detectLineSegments`→`solveCubeFromLines`, and grades the recovered pose
+    against truth (lock + rotation mod the 24 symmetries + centre + depth). Loads the
+    OpenCV WASM, so like `detect-smoke` it is NOT part of `npm test`. CLI outputs go to
+    `samples/synth/` (git-ignored); `hough-image.mjs` points straight at them. The
+    scene/draw core is BROWSER-SAFE (no skia/fs — those stay in the CLI) and shared
+    with the in-page **`?synth`** harness (`main.js`): a synthetic cube replaces the
+    camera as the frame source, with a tuning panel (pose/appearance sliders, URL-
+    synced like `?detect`) and a Save-PNG+JSON button. `?synth` composes with the
+    detector — a "Run line detector" toggle (or `?synth&detect`) overlays the real
+    hough pipeline on the generated frame, so you watch it lock onto a KNOWN pose.
   - **Step 1 (done): vanishing-point grouping** (`src/lines.js`,
     `test/lines.test.mjs`). A cube's edges run along 3 orthogonal directions, each
     projecting to a vanishing point; `groupLineSegments` splits the segments into 3

@@ -206,9 +206,10 @@ html, body {
 .move-chip.current { background: var(--accent); color: #fff; }
 .move-chip.done { opacity: 0.4; }
 
-/* ?detect tuning panel — created by main.js only when the ?detect harness is on,
-   so none of this is in the normal app UI. */
-#detect-panel {
+/* Tuning panels for the ?detect and ?synth harnesses — created by main.js only when
+   those harnesses are on, so none of this is in the normal app UI. Shared via the
+   .tune-panel class; the ids only differ in where they sit. */
+.tune-panel {
   position: fixed;
   top: 8px;
   right: 8px;
@@ -224,16 +225,17 @@ html, body {
   color: var(--muted);
   font-size: 12px;
 }
-#detect-panel h2 {
+#synth-panel { right: auto; left: 8px; } /* keep clear of the detect panel when both are up */
+.tune-panel h2 {
   margin: 0 0 8px;
   font-size: 12px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--fg);
 }
-#detect-panel .dp-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-#detect-panel .dp-row label { flex: 0 0 auto; }
-#detect-panel select {
+.tune-panel .dp-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.tune-panel .dp-row label { flex: 0 0 auto; }
+.tune-panel select {
   flex: 1;
   background: #232a38;
   color: var(--fg);
@@ -243,7 +245,7 @@ html, body {
   font: inherit;
   cursor: pointer;
 }
-#detect-panel .dp-toggle {
+.tune-panel .dp-toggle {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -251,17 +253,18 @@ html, body {
   cursor: pointer;
   user-select: none;
 }
-#detect-panel .dp-toggle input { accent-color: var(--accent); cursor: pointer; }
-#detect-panel #dp-sliders { margin-top: 6px; }
-#detect-panel .dp-slider { margin-bottom: 9px; }
-#detect-panel .dp-slider label {
+.tune-panel .dp-toggle input { accent-color: var(--accent); cursor: pointer; }
+.tune-panel #dp-sliders,
+.tune-panel #sp-sliders { margin-top: 6px; }
+.tune-panel .dp-slider { margin-bottom: 9px; }
+.tune-panel .dp-slider label {
   display: flex;
   justify-content: space-between;
   margin-bottom: 2px;
 }
-#detect-panel .dp-val { color: var(--fg); font-variant-numeric: tabular-nums; }
-#detect-panel input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
-#detect-panel #dp-reset {
+.tune-panel .dp-val { color: var(--fg); font-variant-numeric: tabular-nums; }
+.tune-panel input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+.tune-panel button {
   width: 100%;
   margin-top: 4px;
   padding: 7px;
@@ -273,4 +276,4 @@ html, body {
   font-weight: 600;
   cursor: pointer;
 }
-#detect-panel #dp-reset:active { transform: translateY(1px); }
+.tune-panel button:active { transform: translateY(1px); }
