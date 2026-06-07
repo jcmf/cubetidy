@@ -159,9 +159,25 @@ gaps / next steps:
     unreliable on small/distant cubes (corner1, b-series) where projection is near-
     affine and direction depth is poorly constrained. A confidence gate is the natural
     follow-up.
-  - **Step 3 (next): translation/scale → 6-DoF.** Recover the grid-line intersections
-    (4×4 lattice/face from the two in-plane families per face) and feed the existing
-    `pose.js`/`cube-pose.js` PnP; add a confidence gate from the PnP residual.
+  - **Step 3 (done): metric 6-DoF pose + confidence gate** (`recoverCubePose` in
+    `lines.js`). With R fixed, project the cube grid model, associate each lattice
+    corner to the nearest detected line of each in-plane family (point-to-SEGMENT, so a
+    stray clutter line elsewhere can't shadow it), intersect to a measured corner, and
+    feed those 3D↔2D pairs to the existing `refinePnP` (ICP, robust per-pass trim). The
+    cube centre is symmetry-invariant so t is unambiguous despite the 24-fold R. Two
+    things were essential: (1) seed depth with a 1-D SCAN that slides the cube along the
+    centroid ray and matches projected grid lines to detected ones — the 3×3 grid is
+    periodic, so a length-based depth (biased by foreshortening) lets ICP lock onto a
+    wrong scale alias; (2) the gate: `locked` only when ≥`minCorr` corners reproject
+    within `maxReprojFrac`·edge (knobs in the panel). A wrong/weak R yields few corners
+    or a loose fit and does NOT lock, so the overlay shows a bright wireframe only when
+    trustworthy (dim grey rough wireframe otherwise). Verified on synthetic (locks,
+    recovers metric t, rejects clutter-only). REAL FRAMES: the far/hard sample frames
+    correctly DON'T lock (weak perspective + fragmentary grid → loose reprojection); a
+    cube held close enough for a full crisp grid is needed to lock — verify live.
+  - **Next:** harden on a real close-held cube (tune `maxReprojFrac`/`minLineLen`),
+    temporal smoothing of the locked pose, then read sticker colours off the grid cells
+    to assemble the facelet string (the 24-fold R disambiguates once colours are known).
 - The `?detect` harness has an **on-page tuning panel** (`buildDetectPanel` in
   `main.js`, `#detect-panel` styles) so the detector's knobs are sliders + a method
   dropdown, not query-string edits. Sliders are schema-driven (`DETECT_PARAMS`,

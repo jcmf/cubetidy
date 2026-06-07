@@ -9,7 +9,7 @@
 //
 // Run: npm test
 
-import { groupLineSegments, estimateRotationFromLines, fitVanishingPoint, lineVPError } from '../src/lines.js';
+import { groupLineSegments, estimateRotationFromLines, recoverCubePose, fitVanishingPoint, lineVPError } from '../src/lines.js';
 import { estimateIntrinsics, project } from '../src/pose.js';
 
 let pass = 0, fail = 0;
@@ -242,6 +242,71 @@ function rotAgree(Rtrue, Rest) {
     segments.forEach((s, i) => { if (typeof kind[i] === 'number') { cubeTotal++; if (inBundle(s)) cubeInliers++; } });
     check('rotation: cube edges kept as inliers', cubeInliers >= cubeTotal * 0.8, `${cubeInliers}/${cubeTotal}`);
   }
+})();
+
+// --- step 3: metric pose (lattice -> PnP) + confidence gate --------------------
+
+// The three camera-facing cube faces under R (outward normal s·e_k has camera-frame
+// z = s·R[2][k] < 0 when facing the camera) — mirrors lines.js visibleFaces.
+function visFaces(R) {
+  const f = [];
+  for (let k = 0; k < 3; k++) for (const s of [-1, 1]) f.push({ k, s, nz: s * R[2][k] });
+  return f.sort((a, b) => a.nz - b.nz).slice(0, 3);
+}
+const GRID = [-0.5, -1 / 6, 1 / 6, 0.5];
+
+// Synthesize the projected grid-line segments of a corner-on cube: for each visible
+// face, 4 lines along each in-plane axis (at the grid offsets), spanning the face.
+function cubeGridSegments(R, t, rand) {
+  const segs = [];
+  for (const f of visFaces(R)) {
+    const [a, b] = [0, 1, 2].filter((i) => i !== f.k);
+    for (const [along, off] of [[a, b], [b, a]]) {
+      for (const g of GRID) {
+        const P1 = [0, 0, 0], P2 = [0, 0, 0];
+        P1[f.k] = f.s * 0.5; P2[f.k] = f.s * 0.5;
+        P1[off] = g; P2[off] = g;
+        P1[along] = -0.5; P2[along] = 0.5;
+        const u = project(K, { R, t }, P1), v = project(K, { R, t }, P2);
+        const j = () => (rand() - 0.5);
+        segs.push({ x1: u[0] + j(), y1: u[1] + j(), x2: v[0] + j(), y2: v[1] + j() });
+      }
+    }
+  }
+  return segs;
+}
+
+(() => {
+  const R = rotationAxisAngle([0.9, -1, 0.1], 1.0);
+  const t = [0.4, -0.3, 9];
+  const rand = rng(2024);
+  const segments = cubeGridSegments(R, t, rand);
+  for (let m = 0; m < 10; m++) { // some incoherent clutter
+    const x = rand() * W, y = rand() * H, ang = rand() * Math.PI, L = 25 + rand() * 50;
+    segments.push({ x1: x, y1: y, x2: x + Math.cos(ang) * L, y2: y + Math.sin(ang) * L });
+  }
+
+  const rot = estimateRotationFromLines(segments, K, { vpMaxErrorDeg: 3 });
+  const est = rot && recoverCubePose(rot, K, {});
+  check('pose: locks onto the cube', !!est && est.locked, est ? `count=${est.count} err=${est.reprojErr.toFixed(2)} edge=${est.edgePx.toFixed(0)}` : 'null');
+  if (est) {
+    // The cube centre is invariant under the 24 symmetries, so t is unambiguous.
+    const dt = Math.hypot(est.pose.t[0] - t[0], est.pose.t[1] - t[1], est.pose.t[2] - t[2]);
+    check('pose: recovers metric translation', dt / Math.hypot(...t) < 0.05, `rel dt=${(dt / Math.hypot(...t)).toFixed(3)}`);
+    check('pose: tight reprojection', est.reprojErr < 0.05 * est.edgePx, `err=${est.reprojErr.toFixed(2)} edge=${est.edgePx.toFixed(0)}`);
+  }
+})();
+
+(() => {
+  // Pure clutter: no cube → must NOT lock (the confidence gate earns its keep).
+  const rand = rng(55), segments = [];
+  for (let m = 0; m < 70; m++) {
+    const x = rand() * W, y = rand() * H, ang = rand() * Math.PI, L = 25 + rand() * 70;
+    segments.push({ x1: x, y1: y, x2: x + Math.cos(ang) * L, y2: y + Math.sin(ang) * L });
+  }
+  const rot = estimateRotationFromLines(segments, K, {});
+  const est = rot && recoverCubePose(rot, K, {});
+  check('pose: clutter-only scene does not lock', !est || !est.locked, est ? `count=${est.count} err=${est.reprojErr.toFixed(2)}` : 'no rot');
 })();
 
 console.log(`\n${pass} passed, ${fail} failed`);

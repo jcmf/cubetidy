@@ -20,7 +20,7 @@
 // k-means against a bad local optimum; the partition explaining the most line
 // length wins. All math runs in Hartley-normalized coordinates for conditioning.
 
-import { jacobiEigenSymmetric } from './pose.js';
+import { jacobiEigenSymmetric, refinePnP, project } from './pose.js';
 
 export const VP_DEFAULTS = {
   vpIters: 6,          // EM reassign/refit passes
@@ -414,19 +414,192 @@ export function estimateRotationFromLines(segments, K, opts = {}) {
   return { R, pose: roughPose(R, families, K), families, outliers, inlierLen: bestWeight };
 }
 
-// A rough pose for the orientation overlay: keep R, and place a unit cube (edge 1) at
-// the depth/position whose projection sits at the inlier segments' image centroid with
-// a matching spread. Translation here is only a visualization aid — PnP gives the
-// metric one — so the constants just need to land the wireframe near the cube.
+// A rough pose to seed the metric refinement (and to draw the untrusted overlay):
+// keep R, centre a unit cube on the inlier segments' image centroid, and set depth
+// from the apparent grid-line length — a full grid line spans ~1 cube unit, so
+// edge_px ≈ f/Z. A high percentile of segment lengths approximates a full edge (Hough
+// returns fragments), which estimates depth far better than the centroid spread and
+// keeps the first association from grabbing the wrong (periodic) grid line.
 function roughPose(R, families, K) {
   const segs = families.flatMap((f) => f.segments);
   if (segs.length < 2) return null;
   let mx = 0, my = 0;
   for (const s of segs) { mx += (s.x1 + s.x2) / 2; my += (s.y1 + s.y2) / 2; }
   mx /= segs.length; my /= segs.length;
-  let rad = 0;
-  for (const s of segs) rad += Math.hypot((s.x1 + s.x2) / 2 - mx, (s.y1 + s.y2) / 2 - my);
-  rad = rad / segs.length || 1;
-  const Z = K.f * 0.6 / rad;                 // edge-1 cube; ~match the inlier spread
+  const lens = segs.map((s) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1)).sort((a, b) => a - b);
+  const edgePx = lens[Math.floor(lens.length * 0.75)] || 1;
+  const Z = K.f / Math.max(edgePx, 1);
   return { R, t: [(mx - K.cx) / K.f * Z, (my - K.cy) / K.f * Z, Z] };
+}
+
+// --- step 3: metric pose (lattice -> PnP) + confidence gate ----------------
+
+export const POSE_DEFAULTS = {
+  poseIters: 4,         // ICP-style associate→refine passes
+  assocFrac: 0.6,       // associate a grid corner to lines within this fraction of a cell
+  minCorr: 10,          // need at least this many grid-corner correspondences to lock
+  maxReprojFrac: 0.08,  // ...reprojecting within this fraction of the cube edge (px)
+};
+
+// A 3×3 face is split by lines at these offsets (±½ boundaries, ±1/6 internal) along
+// each in-plane axis; their pairwise crossings are the lattice corners.
+const GRID_OFFSETS = [-0.5, -1 / 6, 1 / 6, 0.5];
+
+// The three cube faces pointing toward the camera under rotation R: a face's outward
+// normal s·e_k maps to camera-frame z = s·R[2][k]; it faces the camera when that is
+// negative. Returns the three most camera-facing { k (axis), s (sign) }.
+function visibleFaces(R) {
+  const faces = [];
+  for (let k = 0; k < 3; k++) for (const s of [-1, 1]) faces.push({ k, s, nz: s * R[2][k] });
+  faces.sort((a, b) => a.nz - b.nz);
+  return faces.slice(0, 3);
+}
+
+// Largest apparent cube-edge length in pixels under a pose — a foreshortening-robust
+// scale for association thresholds and the reprojection gate.
+function edgePixels(K, pose) {
+  let m = 0;
+  for (let k = 0; k < 3; k++) {
+    const a = [0, 0, 0], b = [0, 0, 0];
+    a[k] = 0.5; b[k] = -0.5;
+    const pa = project(K, pose, a), pb = project(K, pose, b);
+    m = Math.max(m, Math.hypot(pa[0] - pb[0], pa[1] - pb[1]));
+  }
+  return m;
+}
+
+// Nearest line to (x,y) among a family — but only lines whose SEGMENT (not just its
+// infinite extension) reaches the point, within `margin`. A grid line spans the face,
+// so a real corner falls on it; a clutter segment elsewhere is rejected even if its
+// infinite line happens to pass nearby, which otherwise lets one stray segment shadow
+// the correct grid line for many corners.
+const nearestLine = (lines, x, y, margin) => {
+  let best = null, bd = Infinity;
+  for (const l of lines) {
+    const s = (x - l.x1) * l.dir[0] + (y - l.y1) * l.dir[1]; // foot position along the segment
+    if (s < -margin || s > l.len + margin) continue;
+    const d = Math.abs(l.a * x + l.b * y + l.c);
+    if (d < bd) { bd = d; best = l; }
+  }
+  return { line: best, dist: bd };
+};
+const intersect = (p, q) => {
+  const w = p.a * q.b - q.a * p.b;
+  if (Math.abs(w) < 1e-9) return null;
+  return [(p.b * q.c - q.b * p.c) / w, (q.a * p.c - p.a * q.c) / w];
+};
+
+// Recover a metric 6-DoF cube pose from a step-2 rotation result, and decide whether
+// to trust it (the confidence gate). With R fixed, the cube's grid model is projected
+// at a rough pose; each projected lattice corner is associated to the nearest detected
+// line of each of its two in-plane families and re-measured as their intersection —
+// giving 3D↔2D correspondences fed to the existing refinePnP (a few associate→refine
+// ICP passes). The cube center is invariant under the 24 cube symmetries, so the
+// recovered translation is unambiguous even though R isn't. Returns { pose, count,
+// reprojErr, edgePx, locked }; `locked` (enough corners reprojecting tightly) is the
+// confidence gate — an ill-conditioned/wrong R yields few corners or a large residual
+// and does not lock, so the overlay never commits to a confidently-wrong cube.
+export function recoverCubePose(rot, K, opts = {}) {
+  const o = { ...POSE_DEFAULTS, ...opts };
+  if (!rot || !rot.pose) return null;
+
+  const famLines = rot.families.map((f) => f.segments.map((s) => ({ ...lineOf(s), x1: s.x1, y1: s.y1 })));
+  const faces = visibleFaces(rot.R);
+  // Model lattice CORNERS (for the final PnP) and model grid LINES per direction (for
+  // the depth search), both on the three visible faces.
+  const models = [];
+  const modelLines = [[], [], []];
+  for (const f of faces) {
+    const inplane = [0, 1, 2].filter((i) => i !== f.k);
+    for (const ga of GRID_OFFSETS) for (const gb of GRID_OFFSETS) {
+      const X = [0, 0, 0];
+      X[f.k] = f.s * 0.5; X[inplane[0]] = ga; X[inplane[1]] = gb;
+      models.push({ X, a: inplane[0], b: inplane[1] });
+    }
+    for (const along of inplane) {
+      const off = inplane.find((i) => i !== along);
+      for (const g of GRID_OFFSETS) {
+        const A = [0, 0, 0], B = [0, 0, 0];
+        A[f.k] = f.s * 0.5; B[f.k] = f.s * 0.5; A[off] = g; B[off] = g; A[along] = -0.5; B[along] = 0.5;
+        modelLines[along].push([A, B]);
+      }
+    }
+  }
+
+  // Mean reprojection error of a correspondence set under a pose.
+  const meanErr = (P, X3, q2) => {
+    let s = 0;
+    for (let i = 0; i < X3.length; i++) { const p = project(K, P, X3[i]); s += Math.hypot(p[0] - q2[i][0], p[1] - q2[i][1]); }
+    return s / (X3.length || 1);
+  };
+
+  // Depth is the one DOF the rough pose gets badly wrong (foreshortening makes grid
+  // lines look shorter, so length-based depth is biased) — and the periodic grid means
+  // a bad scale lets ICP settle on a wrong alias. So before ICP, SCAN depth: slide the
+  // cube along the centroid ray and pick the depth whose projected grid lines best
+  // overlay the detected lines. A 1-D scan can't fall into a local minimum.
+  const t0 = rot.pose.t;
+  const ray = [t0[0] / t0[2], t0[1] / t0[2], 1];   // image-centroid ray; t = z·ray
+  const projLine = (pose, A, B) => {
+    const a = project(K, pose, A), b = project(K, pose, B);
+    let na = a[1] - b[1], nb = b[0] - a[0], nc = a[0] * b[1] - b[0] * a[1];
+    const n = Math.hypot(na, nb) || 1;
+    return [na / n, nb / n, nc / n];
+  };
+  const lineMatchErr = (pose) => {
+    let err = 0, w = 0;
+    for (let c = 0; c < 3; c++) {
+      const mls = modelLines[c].map(([A, B]) => projLine(pose, A, B));
+      for (const s of rot.families[c].segments) {
+        const mx = (s.x1 + s.x2) / 2, my = (s.y1 + s.y2) / 2, len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1) || 1;
+        let d = Infinity;
+        for (const ml of mls) d = Math.min(d, Math.abs(ml[0] * mx + ml[1] * my + ml[2]));
+        err += Math.min(d, 40) * len; w += len;   // capped so a few stray lines don't dominate
+      }
+    }
+    return err / (w || 1);
+  };
+  let bestZ = t0[2], bestZErr = Infinity;
+  for (let i = 0; i <= 40; i++) {
+    const z = t0[2] * (0.4 * Math.pow(2.5 / 0.4, i / 40));   // geometric scan 0.4×..2.5× rough depth
+    const e = lineMatchErr({ R: rot.R, t: [z * ray[0], z * ray[1], z] });
+    if (e < bestZErr) { bestZErr = e; bestZ = z; }
+  }
+
+  // ICP: associate, ROBUSTLY trim (the 3×3 grid is periodic and clutter can sneak into
+  // a family, so a non-robust fit slides onto a wrong alias), refit, and stop if a pass
+  // doesn't improve — keeping the best pose seen.
+  let pose = { R: rot.R, t: [bestZ * ray[0], bestZ * ray[1], bestZ] };
+  let best = { pose, X3: [], q2: [], err: Infinity };
+  for (let iter = 0; iter < o.poseIters; iter++) {
+    const thresh = Math.max(4, edgePixels(K, pose) / 3 * o.assocFrac);
+    const X3 = [], q2 = [];
+    for (const m of models) {
+      const p = project(K, pose, m.X);
+      const la = nearestLine(famLines[m.a], p[0], p[1], thresh);
+      const lb = nearestLine(famLines[m.b], p[0], p[1], thresh);
+      if (!la.line || !lb.line || la.dist > thresh || lb.dist > thresh) continue;
+      const q = intersect(la.line, lb.line);
+      if (!q || Math.hypot(q[0] - p[0], q[1] - p[1]) > thresh) continue;
+      X3.push(m.X); q2.push(q);
+    }
+    if (X3.length < o.minCorr) break;
+    // Trim correspondences far from the current pose (mis-associations) before refit.
+    const r = X3.map((X, i) => { const p = project(K, pose, X); return Math.hypot(p[0] - q2[i][0], p[1] - q2[i][1]); });
+    const med = [...r].sort((a, b) => a - b)[r.length >> 1] || 0;
+    const cut = Math.max(3, 2.5 * med);
+    const k = r.map((v, i) => (v <= cut ? i : -1)).filter((i) => i >= 0);
+    const iX = k.map((i) => X3[i]), iq = k.map((i) => q2[i]);
+    if (iX.length < o.minCorr) break;
+    const next = refinePnP(pose.R, pose.t, iX, iq, K);
+    if (!Number.isFinite(next.t[0]) || !Number.isFinite(next.t[2]) || next.t[2] <= 0) break;
+    const err = meanErr(next, iX, iq);
+    if (err < best.err) best = { pose: next, X3: iX, q2: iq, err };
+    else break; // no improvement → converged or diverging; keep the best
+    pose = next;
+  }
+
+  const edgePx = edgePixels(K, best.pose);
+  const locked = best.X3.length >= o.minCorr && best.err <= o.maxReprojFrac * edgePx;
+  return { pose: best.pose, count: best.X3.length, reprojErr: best.err, edgePx, locked };
 }
