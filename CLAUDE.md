@@ -141,10 +141,14 @@ gaps / next steps:
     `samples/synth/` (git-ignored); `hough-image.mjs` points straight at them. The
     scene/draw core is BROWSER-SAFE (no skia/fs — those stay in the CLI) and shared
     with the in-page **`?synth`** harness (`main.js`): a synthetic cube replaces the
-    camera as the frame source, with a tuning panel (pose/appearance sliders, URL-
-    synced like `?detect`) and a Save-PNG+JSON button. `?synth` composes with the
-    detector — a "Run line detector" toggle (or `?synth&detect`) overlays the real
-    hough pipeline on the generated frame, so you watch it lock onto a KNOWN pose.
+    camera as the frame source, with a tuning panel on the LEFT (pose/appearance
+    sliders, URL-synced like `?detect`) and a Save-PNG+JSON button. `?synth` composes
+    with the detector — a "Run line detector" toggle (or `?synth&detect`) overlays the
+    real hough pipeline on the generated frame AND shows the detect tuning panel on the
+    RIGHT, so you tune the detector while watching it lock onto a KNOWN pose. The two
+    panels' URL-syncs are disjoint (each manages only its own schema keys + preserves
+    the other's), so the synth knob `blur` is named `imgBlur` to avoid colliding with
+    the detector's Canny `blur`; in `?synth` the overlay is tracked by `runDetect`.
   - **Step 1 (done): vanishing-point grouping** (`src/lines.js`,
     `test/lines.test.mjs`). A cube's edges run along 3 orthogonal directions, each
     projecting to a vanishing point; `groupLineSegments` splits the segments into 3

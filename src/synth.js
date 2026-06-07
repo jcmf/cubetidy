@@ -197,7 +197,10 @@ export function drawScene(ctx, scene, opts = {}) {
   for (const face of groupByFace(stickers)) fillPoly(face.outline, '#0a0a0a');
   for (const s of stickers) fillPoly(insetQuad(s.quad2D, gap), `rgb(${s.rgb[0]},${s.rgb[1]},${s.rgb[2]})`);
 
-  if (opts.blur && +opts.blur > 0) { ctx.filter = `blur(${+opts.blur}px)`; ctx.drawImage(ctx.canvas, 0, 0); ctx.filter = 'none'; }
+  // `imgBlur` (alias `blur` for the CLI) — named so it doesn't collide with the
+  // detector's own Canny `blur` knob when ?synth&detect runs both tuning panels.
+  const blurPx = +(opts.imgBlur ?? opts.blur ?? 0);
+  if (blurPx > 0) { ctx.filter = `blur(${blurPx}px)`; ctx.drawImage(ctx.canvas, 0, 0); ctx.filter = 'none'; }
   if (opts.noise && +opts.noise > 0) addNoise(ctx, width, height, +opts.noise, opts.seed);
 }
 

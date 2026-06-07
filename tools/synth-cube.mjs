@@ -20,7 +20,7 @@
 //
 // Knobs: width,height,fovDeg | axis=x,y,z angleDeg dist tx ty (pose) |
 //        scramble=<seed> (random per-sticker colours; 0=solved) |
-//        gap bg blur noise (rendering). Writes <out>.png and <out>.truth.json.
+//        gap bg imgBlur(=blur) noise (rendering). Writes <out>.png and <out>.truth.json.
 
 import { Canvas } from 'skia-canvas';
 import { writeFileSync, mkdirSync } from 'node:fs';

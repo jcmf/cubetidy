@@ -56,7 +56,7 @@ const synthOpts = (() => {
 })();
 const synthDisplay = { runDetect: DEBUG_SYNTH && (new URLSearchParams(location.search).has('runDetect') || DEBUG_DETECT) };
 const synthState = { scene: null };
-const SYNTH_DEFAULTS = { angleDeg: 57, axisX: 0.9, axisY: -1, axisZ: 0.1, dist: 6, tx: 0, ty: 0, gap: 0.1, blur: 0, noise: 0, scramble: 0 };
+const SYNTH_DEFAULTS = { angleDeg: 57, axisX: 0.9, axisY: -1, axisZ: 0.1, dist: 6, tx: 0, ty: 0, gap: 0.1, imgBlur: 0, noise: 0, scramble: 0 };
 // Slider schema for the ?synth panel (bounds only; values come from SYNTH_DEFAULTS).
 const SYNTH_PARAMS = [
   { k: 'angleDeg', label: 'Angle°',    min: 0,  max: 180, step: 1 },
@@ -67,11 +67,11 @@ const SYNTH_PARAMS = [
   { k: 'tx',       label: 'Offset X',  min: -2, max: 2,   step: 0.05 },
   { k: 'ty',       label: 'Offset Y',  min: -2, max: 2,   step: 0.05 },
   { k: 'gap',      label: 'Sticker gap', min: 0, max: 0.3, step: 0.01 },
-  { k: 'blur',     label: 'Blur px',   min: 0,  max: 8,   step: 0.5 },
+  { k: 'imgBlur',  label: 'Blur px',   min: 0,  max: 8,   step: 0.5 },
   { k: 'noise',    label: 'Noise',     min: 0,  max: 40,  step: 1 },
   { k: 'scramble', label: 'Scramble seed', min: 0, max: 60, step: 1 },
 ];
-if (DEBUG_SYNTH && synthDisplay.runDetect) detectOpts.method = 'hough';
+if (DEBUG_SYNTH && synthDisplay.runDetect) detectOpts.method ??= 'hough'; // hough by default, but honour an explicit ?method=
 
 // Schema for the on-page tuning panel: every numeric detector knob with its slider
 // bounds and which method(s) it applies to (only the active method's knobs show).
@@ -637,6 +637,7 @@ if (DEBUG_SYNTH) {
   els.mirror.style.display = 'none';
   els.primary.hidden = true;
   buildSynthPanel();
+  if (synthDisplay.runDetect) buildDetectPanel(); // detect controls on the right, alongside the synth panel
   console.log('[synth] generator ON; opts =', synthOpts, synthDisplay.runDetect ? '(detector overlay on)' : '');
 }
 
@@ -648,11 +649,20 @@ function stepDecimals(step) { const s = String(step); return s.includes('.') ? s
 // Reflect the live tuning back into the URL so a reload (or a copied link) restores
 // it — the on-page panel replaces editing the query string by hand, it doesn't
 // abandon it. Only touched/overridden knobs end up in the URL, keeping it compact.
+// It manages ONLY the detector's own schema keys (DETECT_PARAMS + method + hideCamera)
+// and leaves everything else untouched, so under ?synth&detect it preserves the synth
+// panel's params instead of wiping them. Under ?synth the synth panel owns the page,
+// so the overlay is tracked by `runDetect`, not the `detect` flag.
 function syncDetectURL() {
-  const params = new URLSearchParams();
-  params.set('detect', '');
-  for (const [k, v] of Object.entries(detectOpts)) params.set(k, String(v));
-  if (detectDisplay.hideCamera) params.set('hideCamera', '1');
+  const params = new URLSearchParams(location.search);
+  for (const p of DETECT_PARAMS) params.delete(p.k);
+  params.delete('method');
+  params.delete('hideCamera');
+  if (DEBUG_SYNTH) params.delete('detect');
+  else params.set('detect', '');
+  if (detectOpts.method != null) params.set('method', String(detectOpts.method));
+  for (const p of DETECT_PARAMS) if (p.k in detectOpts) params.set(p.k, String(detectOpts[p.k]));
+  if (!DEBUG_SYNTH && detectDisplay.hideCamera) params.set('hideCamera', '1');
   history.replaceState(null, '', location.pathname + '?' + params.toString());
 }
 
@@ -661,6 +671,7 @@ function syncDetectURL() {
 // method. Sliders mutate detectOpts in place — the worker reads it every frame —
 // and mirror into the URL. Reset clears overrides back to the method's defaults.
 function buildDetectPanel() {
+  if (document.getElementById('detect-panel')) return; // idempotent (?synth toggles it on/off)
   const panel = document.createElement('div');
   panel.id = 'detect-panel';
   panel.className = 'tune-panel';
@@ -719,6 +730,9 @@ function buildDetectPanel() {
   hide.checked = detectDisplay.hideCamera;
   hide.addEventListener('change', () => { detectDisplay.hideCamera = hide.checked; syncDetectURL(); });
 
+  // Under ?synth there's no camera, so the Mirror / Hide-camera toggles are meaningless.
+  if (DEBUG_SYNTH) for (const id of ['#dp-mirror', '#dp-hide']) panel.querySelector(id).closest('.dp-toggle').style.display = 'none';
+
   panel.querySelector('#dp-reset').addEventListener('click', () => {
     for (const p of DETECT_PARAMS) delete detectOpts[p.k];
     renderSliders();
@@ -735,6 +749,9 @@ function syncSynthURL() {
   const params = new URLSearchParams(location.search);
   for (const p of SYNTH_PARAMS) params.delete(p.k);
   params.set('synth', '');
+  // The overlay is canonically tracked by `runDetect`; drop the `detect` alias so the
+  // two flags don't ping-pong (a fresh ?synth&detect link still enables it on load).
+  params.delete('detect');
   for (const p of SYNTH_PARAMS) if (p.k in synthOpts) params.set(p.k, String(synthOpts[p.k]));
   if (synthDisplay.runDetect) params.set('runDetect', '1'); else params.delete('runDetect');
   history.replaceState(null, '', location.pathname + '?' + params.toString());
@@ -783,7 +800,8 @@ function buildSynthPanel() {
   detect.checked = synthDisplay.runDetect;
   detect.addEventListener('change', () => {
     synthDisplay.runDetect = detect.checked;
-    if (detect.checked) { detectOpts.method = 'hough'; startCV(); } // safe to call repeatedly
+    if (detect.checked) { detectOpts.method ??= 'hough'; startCV(); buildDetectPanel(); } // detect controls appear on the right
+    else document.getElementById('detect-panel')?.remove();
     syncSynthURL();
   });
 
