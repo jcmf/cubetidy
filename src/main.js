@@ -205,19 +205,20 @@ function drawDetectResults() {
       detectState.grouping = detectState.sol ? detectState.sol.rot : groupLineSegments(segments, detectOpts);
       // Temporally fuse the locked pose (reject the intermittent wrong locks, hold
       // through dropouts) so the overlay is steady instead of flickering right/wrong.
-      const locked = detectState.sol && detectState.sol.pose && detectState.sol.pose.locked ? detectState.sol.pose : null;
-      detectState.smoothPose = smoothLinePose(detectState.smoothPose, locked, detectOpts);
+      // sol.fit is the recoverCubePose result; the metric {R,t} is sol.fit.pose.
+      const fit = detectState.sol && detectState.sol.fit;
+      detectState.smoothPose = smoothLinePose(detectState.smoothPose, fit && fit.locked ? fit.pose : null, detectOpts);
     }
     const g = detectState.grouping, sol = detectState.sol, sm = detectState.smoothPose;
+    const fit = sol && sol.fit;
     if (g && g.families.length) drawLineGroups(ctx, g);
     else drawSegments(ctx, segments);
     if (sm) drawCubeWireframe(ctx, detectState.K, sm, '#39ff14');
     else if (sol && sol.rot.pose) drawCubeWireframe(ctx, detectState.K, sol.rot.pose, 'rgba(150,160,175,0.55)');
     const counts = g && g.families.length ? g.families.map((f) => f.segments.length).join('/') : '—';
-    const instant = sol && sol.pose && sol.pose.locked;
     setDetectStatus(
       `detect[hough]: <b>${segments.length}</b> segs · families <b>${counts}</b>` +
-      (sm ? ` · <b>LOCK</b>${instant ? ` ${sol.pose.count}pts ${sol.pose.reprojErr.toFixed(1)}px` : ' (held)'}`
+      (sm ? ` · <b>LOCK</b>${fit && fit.locked ? ` ${fit.count}pts ${fit.reprojErr.toFixed(1)}px` : ' (held)'}`
         : sol ? ' · searching' : ' · no R'));
     return;
   }

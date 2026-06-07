@@ -302,7 +302,14 @@ function cubeGridSegments(R, t, rand) {
 
   // The full sweep wrapper also locks (and picks a locked result).
   const sol = solveCubeFromLines(segments, K, {});
-  check('solve: sweep wrapper locks onto the cube', !!sol && !!sol.pose && sol.pose.locked, sol && sol.pose ? `count=${sol.pose.count} err=${sol.pose.reprojErr.toFixed(2)}` : 'no lock');
+  check('solve: sweep wrapper locks onto the cube', !!sol && !!sol.fit && sol.fit.locked, sol && sol.fit ? `count=${sol.fit.count} err=${sol.fit.reprojErr.toFixed(2)}` : 'no lock');
+
+  // Integration at the main.js seam: the metric pose is sol.fit.pose ({R,t}), and that
+  // is what feeds the smoother. Guards the shape mismatch that froze the live overlay.
+  let seamOk = true;
+  try { const s = smoothLinePose(null, sol.fit.pose, {}); seamOk = !!s && Array.isArray(s.t) && Array.isArray(s.R); }
+  catch (e) { seamOk = false; }
+  check('solve→smooth seam: fit.pose feeds smoothLinePose without throwing', seamOk);
   if (est) {
     // The cube centre is invariant under the 24 symmetries, so t is unambiguous.
     const dt = Math.hypot(est.pose.t[0] - t[0], est.pose.t[1] - t[1], est.pose.t[2] - t[2]);

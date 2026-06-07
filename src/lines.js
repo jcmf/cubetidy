@@ -614,7 +614,9 @@ export function recoverCubePose(rot, K, opts = {}) {
 // beats a non-lock, ties broken by lowest reprojection. A wrong frame fails to lock at
 // every angle (too few corners), so the sweep can't manufacture a false lock. An
 // explicit vpMaxErrorDeg (e.g. from the tuning panel) pins the sweep to that one value.
-// Returns { rot, pose } (pose may be null/unlocked) or null if no rotation at all.
+// Returns { rot, fit } or null if no rotation at all. `rot` is the estimateRotationFromLines
+// result (families + a rough pose); `fit` is the recoverCubePose result whose `.pose` is the
+// metric {R,t} and `.locked` the gate — note the metric pose is `sol.fit.pose`, not `sol.fit`.
 export function solveCubeFromLines(segments, K, opts = {}) {
   const sweep = opts.vpMaxErrorDeg != null ? [opts.vpMaxErrorDeg] : (opts.vpSweep ?? POSE_DEFAULTS.vpSweep);
   let best = null;
@@ -622,13 +624,13 @@ export function solveCubeFromLines(segments, K, opts = {}) {
     const o2 = { ...opts, vpMaxErrorDeg: deg };
     const rot = estimateRotationFromLines(segments, K, o2);
     if (!rot) continue;
-    const pose = recoverCubePose(rot, K, o2);
-    const cand = { rot, pose };
+    const fit = recoverCubePose(rot, K, o2);
+    const cand = { rot, fit };
     if (!best) { best = cand; continue; }
-    const la = best.pose && best.pose.locked, lb = pose && pose.locked;
+    const la = best.fit && best.fit.locked, lb = fit && fit.locked;
     if (la !== lb) { if (lb) best = cand; }
-    else if (la && lb) { if (pose.reprojErr < best.pose.reprojErr) best = cand; }
-    else if ((pose ? pose.count : 0) > (best.pose ? best.pose.count : 0)) best = cand;
+    else if (la && lb) { if (fit.reprojErr < best.fit.reprojErr) best = cand; }
+    else if ((fit ? fit.count : 0) > (best.fit ? best.fit.count : 0)) best = cand;
   }
   return best;
 }

@@ -63,7 +63,7 @@ for (const p of paths) {
     const sol = solveCubeFromLines(segments, K, opts);
     const g = sol ? sol.rot : groupLineSegments(segments, opts);
     drawLineGroups(ctx, g);
-    const P = sol && sol.pose;
+    const P = sol && sol.fit;
     if (P && P.locked) drawCubeWireframe(ctx, K, P.pose, '#39ff14');
     else if (sol && sol.rot.pose) drawCubeWireframe(ctx, K, sol.rot.pose, 'rgba(150,160,175,0.7)');
     info = `${segments.length} segs | families ${g.families.map((f) => f.segments.length).join('/')} | ${g.outliers.length} out | `
