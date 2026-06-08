@@ -611,7 +611,12 @@ export function recoverCubePose(rot, K, opts = {}) {
   // PREFER the periodic aliases — a cell-shifted / shrunk cube fits a subset tighter — so
   // they pull the fit off by whole stickers. Coverage does the opposite: the alias leaves
   // the OUTER detected lines uncovered, lowering its score, so the correct cube wins. We
-  // search a small box (±~½ cell laterally, ±8% depth) about the alias-free anchor.
+  // search a small box (±0.8 cell laterally, ±8% depth) about the alias-free anchor — the
+  // coarse lateral STEP must stay ≤ tol or it skips over the (tol-wide) true coverage peak
+  // and the fine passes then refine a wrong secondary peak (this is what put close/strong-
+  // perspective cubes one cell off); the range must NOT grow past ~±0.8 cell or it reaches
+  // a neighbouring alias peak the uniform-shift model scores too high (a wider fine grid
+  // regressed the tilted pose).
   const projGrid = (P) => modelLines.map((dir) => dir.map(([A, B]) => {
     const a = project(K, P, A), b = project(K, P, B);
     let na = a[1] - b[1], nb = b[0] - a[0], nc = a[0] * b[1] - b[0] * a[1];
@@ -635,16 +640,16 @@ export function recoverCubePose(rot, K, opts = {}) {
   let pose = { R: rot.R, t: anchorT(rot.R, t0[2]) };
   const cell0 = edgePixels(K, pose) / 3 || 1;
   const tol = 0.22 * cell0;
-  const search = (centre, dStep, latStep) => {
+  const search = (centre, dStep, latStep, nLat = 3) => {
     let bestP = centre, bestS = softCover(centre, tol);
-    for (let i = -3; i <= 3; i++) for (let j = -3; j <= 3; j++) for (let kk = -2; kk <= 2; kk++) {
+    for (let i = -nLat; i <= nLat; i++) for (let j = -nLat; j <= nLat; j++) for (let kk = -2; kk <= 2; kk++) {
       const P = slid(centre.R, centre.t, 1 + kk * dStep, i * latStep, j * latStep);
       const s = softCover(P, tol);
       if (s > bestS) { bestS = s; bestP = P; }
     }
     return bestP;
   };
-  pose = search(pose, 0.04, 0.28 * cell0);    // coarse: ±0.84 cell lateral, ±8% depth
+  pose = search(pose, 0.04, 0.20 * cell0, 4); // coarse: ±0.8 cell lateral @0.20 (≤tol) step, ±8% depth
   pose = search(pose, 0.015, 0.09 * cell0);   // fine
   pose = search(pose, 0.006, 0.035 * cell0);  // finer
 
