@@ -43,14 +43,26 @@ export function rotationAxisAngle([ax, ay, az], angle) {
   ];
 }
 
-// The three cube faces pointing toward the camera under R (replicates the private
-// visibleFaces in src/lines.js): a face normal s·e_k maps to camera z = s·R[2][k];
-// it faces the camera when that is negative.
-function visibleFaces(R) {
+// The cube faces actually facing the camera at this pose — the ones drawScene should
+// paint. A planar face is visible when its outward normal points back toward the camera:
+// Nc·Cc < 0, where Nc = R·(s·e_k) is the normal and Cc = R·(s/2·e_k)+t the face centre,
+// both in camera coords. This is the PERSPECTIVE-correct test and DELIBERATELY differs
+// from the detector's orthographic visibleFaces in src/lines.js (s·R[2][k]<0, always 3):
+// that optical-axis approximation misjudges a near-edge-on face when the cube is close
+// AND laterally offset — a back face whose centre is off-axis can still score
+// s·R[2][k]<0, so the old code drew a PHANTOM face over the real ones (e.g. ?synth dist=3
+// with a tx/ty offset painted the down/up face across the top). The detector keeps the
+// simple always-corner-on prior (its scan is corner-on); the renderer must be physically
+// correct. Returns the genuine visible set (1–3 faces), farthest-first for painter order.
+function visibleFaces(R, t) {
   const faces = [];
-  for (let k = 0; k < 3; k++) for (const s of [-1, 1]) faces.push({ k, s, nz: s * R[2][k] });
-  faces.sort((a, b) => a.nz - b.nz);
-  return faces.slice(0, 3);
+  for (let k = 0; k < 3; k++) for (const s of [-1, 1]) {
+    const nx = R[0][k] * s, ny = R[1][k] * s, nz = R[2][k] * s;             // normal, camera coords
+    const cx = nx * 0.5 + t[0], cy = ny * 0.5 + t[1], cz = nz * 0.5 + t[2]; // face centre, camera coords
+    if (nx * cx + ny * cy + nz * cz < 0) faces.push({ k, s, depth: cz });
+  }
+  faces.sort((a, b) => b.depth - a.depth); // farthest first
+  return faces;
 }
 
 // Largest apparent cube-edge length in px under a pose (matches edgePixels in lines.js).
@@ -103,7 +115,7 @@ export function buildCubeScene(opts = {}) {
   const t = opts.t || [+opts.tx || 0, +opts.ty || 0, dist];
   const pose = { R, t };
 
-  const faces = visibleFaces(R);
+  const faces = visibleFaces(R, t);
   const seed = +opts.scramble || 0;
   const rand = rng(seed || 1);
 
