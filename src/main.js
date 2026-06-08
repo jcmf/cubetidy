@@ -256,6 +256,19 @@ function saveSynth() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   downloadDataURL(off.toDataURL('image/png'), `synth-${stamp}.png`);
   downloadDataURL('data:application/json,' + encodeURIComponent(JSON.stringify(scene.truth, null, 2)), `synth-${stamp}.truth.json`);
+  // When the detector overlay is on, also dump its EXACT segments + K. solveCubeFromLines
+  // is pure/deterministic on (segments, K), so these reproduce the live lock bit-for-bit
+  // offline — the re-rendered PNG above does NOT (its offscreen rasterization differs from
+  // the sampled main canvas by a few Hough segments, enough to flip a brittle alias). Pairs
+  // with the truth pose to make a regression fixture testable without OpenCV (cf lines.test).
+  const segs = synthDisplay.runDetect ? latestSegments() : null;
+  if (segs && segs.length) {
+    const payload = { K: detectState.K || estimateIntrinsics(W, H), width: W, height: H,
+      segments: segs.map((s) => ({ x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2 })),
+      truth: { R: scene.truth.R, t: scene.truth.t, edgePx: scene.truth.edgePx, dist: scene.truth.dist } };
+    downloadDataURL('data:application/json,' + encodeURIComponent(JSON.stringify(payload)), `synth-${stamp}.segs.json`);
+    console.log(`[synth] saved synth-${stamp}.segs.json (${segs.length} segments)`);
+  }
   console.log(`[synth] saved synth-${stamp}.png (${W}x${H}) + truth JSON`);
 }
 
