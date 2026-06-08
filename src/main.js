@@ -7,9 +7,9 @@ import { glyphSVG } from './glyph.js';
 import { startCV, cvReady, requestDetect, latestQuads, latestSegments } from './opencv.js';
 import { findFaceGrids, fitFaceGrid } from './group.js';
 import { estimateCubePose } from './cube-pose.js';
-import { estimateIntrinsics } from './pose.js';
+import { estimateIntrinsics, project } from './pose.js';
 import { DETECT_DEFAULTS, HOUGH_DEFAULTS } from './detect.js';
-import { groupLineSegments, solveCubeFromLines, smoothLinePose, VP_DEFAULTS, ROT_DEFAULTS, POSE_DEFAULTS, POSE_SMOOTH_DEFAULTS } from './lines.js';
+import { groupLineSegments, solveCubeFromLines, smoothLinePose, canonicalizeRotation, rotationAngleDeg, VP_DEFAULTS, ROT_DEFAULTS, POSE_DEFAULTS, POSE_SMOOTH_DEFAULTS } from './lines.js';
 import { buildCubeScene, drawScene } from './synth.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
@@ -269,6 +269,20 @@ function requestDetectFrame() {
   }
 }
 
+// ?synth only: grade a recovered pose against the scene's KNOWN truth (centre offset as
+// a fraction of edge, rotation mod the 24 cube symmetries, depth). Returns '' outside
+// ?synth (no truth) — same metrics as tools/synth-smoke.mjs so live and offline agree.
+function truthError(pose) {
+  const scene = synthState.scene;
+  if (!scene || !pose) return '';
+  const K = detectState.K, tp = scene.pose, ePx = scene.truth.edgePx || 1;
+  const cT = project(K, tp, [0, 0, 0]), cF = project(K, pose, [0, 0, 0]);
+  const centre = Math.hypot(cF[0] - cT[0], cF[1] - cT[1]) / ePx * 100;
+  const rot = rotationAngleDeg(tp.R, canonicalizeRotation(pose.R, tp.R));
+  const depth = Math.abs(pose.t[2] - tp.t[2]) / (tp.t[2] || 1) * 100;
+  return ` · <b>vs truth</b> centre ${centre.toFixed(0)}% rot ${rot.toFixed(0)}° depth ${depth.toFixed(0)}%`;
+}
+
 // On each fresh detection result, group -> fit -> temporally smooth; draw the
 // smoothed faces every frame. Count goes to the status bar, never the canvas
 // (mirrored text reads backwards).
@@ -303,9 +317,13 @@ function drawDetectResults() {
     if (sm) drawCubeWireframe(ctx, detectState.K, sm, '#39ff14');
     else if (sol && sol.rot.pose) drawCubeWireframe(ctx, detectState.K, sol.rot.pose, 'rgba(150,160,175,0.55)');
     const counts = g && g.families.length ? g.families.map((f) => f.segments.length).join('/') : '—';
+    // In ?synth the ground-truth pose is known, so grade the DISPLAYED (smoothed) lock
+    // against it — the whole point of ?synth is watching the detector hit a known pose,
+    // and this is the only place that closes the offline/live gap (the browser rasterizes
+    // the cube differently than skia, so segments — and the lock — differ from synth-smoke).
     setDetectStatus(
       `detect[hough]: <b>${segments.length}</b> segs · families <b>${counts}</b>` +
-      (sm ? ` · <b>LOCK</b>${fit && fit.locked ? ` ${fit.count}pts ${fit.reprojErr.toFixed(1)}px` : ' (held)'}`
+      (sm ? ` · <b>LOCK</b>${fit && fit.locked ? ` ${fit.count}pts ${fit.reprojErr.toFixed(1)}px` : ' (held)'}` + truthError(sm)
         : sol ? ' · searching' : ' · no R'));
     return;
   }
