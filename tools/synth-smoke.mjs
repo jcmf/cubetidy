@@ -35,6 +35,10 @@ const SCENES = [
   { tag: 'tilted', axis: '0.4,-1,0.5', angleDeg: 65, dist: 5 },
   { tag: 'corner-on dist3', axis: '-0.55,-1,0.1', angleDeg: 57, dist: 3, tx: 0.05, ty: -0.1 },
   { tag: 'tilted dist3', axis: '0.4,-1,0.5', angleDeg: 65, dist: 3.2, tx: -0.1, ty: 0.05 },
+  // Near-EDGE-ON: only 2 faces visible. A close-to-affine starved VP family leaves the
+  // lateral cell under-constrained; guards the cell-hop translation fix that lands it on
+  // the right sticker (the orthographic 3-face model + single search put it a cell off).
+  { tag: 'edge-on 2-face', axis: '0.15,-1,0.1', angleDeg: 57, dist: 3, tx: 0.05, ty: -0.2 },
 ];
 
 const ANGLE_TOL = 8;     // recovered R within this many degrees of truth (mod symmetry)
