@@ -443,20 +443,32 @@ export const POSE_DEFAULTS = {
   maxReprojFrac: 0.1,   // ...reprojecting within this fraction of the cube edge (px)
   minCover: 0.45,       // ...and at least this fraction of detected line length on the grid
   vpSweep: [3, 4, 5, 6],// inlier angles (deg) solveCubeFromLines tries; the best lock wins
+  hopMargin: 1.04,      // adopt a ±1-cell translation hop only if it beats the phase cover ×this
 };
 
 // A 3×3 face is split by lines at these offsets (±½ boundaries, ±1/6 internal) along
 // each in-plane axis; their pairwise crossings are the lattice corners.
 const GRID_OFFSETS = [-0.5, -1 / 6, 1 / 6, 0.5];
 
-// The three cube faces pointing toward the camera under rotation R: a face's outward
-// normal s·e_k maps to camera-frame z = s·R[2][k]; it faces the camera when that is
-// negative. Returns the three most camera-facing { k (axis), s (sign) }.
-function visibleFaces(R) {
-  const faces = [];
-  for (let k = 0; k < 3; k++) for (const s of [-1, 1]) faces.push({ k, s, nz: s * R[2][k] });
-  faces.sort((a, b) => a.nz - b.nz);
-  return faces.slice(0, 3);
+// The cube faces actually facing the camera at pose (R, t) — the ones whose grid the
+// detector models. A face is visible iff its outward normal points back at the camera:
+// Nc·Cc < 0, with Nc = R·(s·e_k) the normal and Cc = R·(s/2·e_k)+t the face centre
+// (camera coords). On a near-EDGE-ON view only 2 faces qualify, and modelling the
+// orthographic always-3 set (s·R[2][k]<0) adds a PHANTOM 3rd face whose grid corrupts
+// the coverage objective the cell-hop relies on — so the 2-face lock lands a sticker
+// sideways. `t` is the rough pose's translation; only its direction matters here. Falls
+// back to the 3 most-facing if degeneracy leaves <2 (keeps the model non-empty). The
+// trade-off: a distant near-affine cube with an unreliable rough t can lose its marginal
+// 3rd face (e.g. far b-series), but those locks are weak and untrusted anyway.
+function visibleFaces(R, t) {
+  const scored = [];
+  for (let k = 0; k < 3; k++) for (const s of [-1, 1]) {
+    const nx = R[0][k] * s, ny = R[1][k] * s, nz = R[2][k] * s;             // normal, camera coords
+    const cx = nx * 0.5 + t[0], cy = ny * 0.5 + t[1], cz = nz * 0.5 + t[2]; // face centre, camera coords
+    scored.push({ k, s, dot: nx * cx + ny * cy + nz * cz });
+  }
+  const vis = scored.filter((f) => f.dot < 0);
+  return (vis.length >= 2 ? vis : scored.sort((a, b) => a.dot - b.dot).slice(0, 3)).map(({ k, s }) => ({ k, s }));
 }
 
 // Largest apparent cube-edge length in pixels under a pose — a foreshortening-robust
@@ -508,7 +520,7 @@ export function recoverCubePose(rot, K, opts = {}) {
   if (!rot || !rot.pose) return null;
 
   const famLines = rot.families.map((f) => f.segments.map((s) => ({ ...lineOf(s), x1: s.x1, y1: s.y1 })));
-  const faces = visibleFaces(rot.R);
+  const faces = visibleFaces(rot.R, rot.pose.t);
   // Model lattice CORNERS (for the final PnP) and model grid LINES per direction (for
   // the depth search), both on the three visible faces.
   const models = [];
@@ -649,9 +661,39 @@ export function recoverCubePose(rot, K, opts = {}) {
     }
     return bestP;
   };
+  // PHASE: local coverage refine — settles to the right sub-cell offset WITHIN whatever
+  // cell the (alias-free) anchor is nearest. This is the whole translation fit for a
+  // corner-on cube, so it's left exactly as-is to keep that path's behaviour.
   pose = search(pose, 0.04, 0.20 * cell0, 4); // coarse: ±0.8 cell lateral @0.20 (≤tol) step, ±8% depth
   pose = search(pose, 0.015, 0.09 * cell0);   // fine
   pose = search(pose, 0.006, 0.035 * cell0);  // finer
+  // CELL hop: the 3×3 grid is PERIODIC, so coverage has near-equal maxima one cell apart
+  // and the phase search can lock in the WRONG cell when the anchor is off by >½ cell
+  // (near-edge-on / 2-face / off-centre poses — the lock lands a whole sticker sideways).
+  // Try hopping ±1 cell along each cube axis (t += R·δ, δ in cells — the true,
+  // perspective-correct alias directions, NOT uniform image shifts), refine the best
+  // candidates, and ADOPT one only if it beats the phase's coverage by a clear margin.
+  // The margin is the safety valve: when the phase cell is already the coverage max (every
+  // corner-on cube), no hop clears it, so those locks are never disturbed; only a
+  // genuinely-better cell (the 2-face fix) wins. Enumerating face-normal hops too is
+  // harmless — off-grid candidates score low and never clear the margin.
+  const phaseCover = softCover(pose, tol);
+  const refineCell = (p) => search(search(p, 0.02, 0.05 * cell0), 0.006, 0.02 * cell0);
+  const Rp = pose.R, hops = [];
+  for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) for (let kc = -1; kc <= 1; kc++) {
+    if (!i && !j && !kc) continue;
+    const t = [pose.t[0] + (Rp[0][0] * i + Rp[0][1] * j + Rp[0][2] * kc) / 3,
+               pose.t[1] + (Rp[1][0] * i + Rp[1][1] * j + Rp[1][2] * kc) / 3,
+               pose.t[2] + (Rp[2][0] * i + Rp[2][1] * j + Rp[2][2] * kc) / 3];
+    hops.push({ P: { R: Rp, t }, s: softCover({ R: Rp, t }, tol) });
+  }
+  hops.sort((a, b) => b.s - a.s);
+  let hopBest = null, hopCover = -Infinity;
+  for (let n = 0; n < 3 && n < hops.length; n++) {
+    const r = refineCell(hops[n].P), s = softCover(r, tol);
+    if (s > hopCover) { hopCover = s; hopBest = r; }
+  }
+  if (hopBest && hopCover > phaseCover * o.hopMargin) pose = hopBest;
 
   const fin = associate(pose);
   const edgePx = edgePixels(K, pose);
