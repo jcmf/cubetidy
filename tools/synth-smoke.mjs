@@ -25,11 +25,16 @@ await new Promise((r) => { if (cv && cv.Mat) return r(); cv.onRuntimeInitialized
 // Poses chosen to span the detector's regime: strong perspective (close), three
 // corner-on faces with separated VPs. Far/near-affine views are deliberately out of
 // scope (the detector itself doesn't claim them — see lines.js step-2 KEY LIMIT).
+// The dist=3 entries pin the VERY-close / strong-perspective end (cube near or past the
+// frame edge): there the coverage search's coarse lateral step must stay ≤ tol or it
+// skips the true peak and the lock lands one cell off — guard against that regressing.
 const SCENES = [
   { tag: 'corner-on A close', axis: '0.9,-1,0.1', angleDeg: 57, dist: 4.5 },
   { tag: 'corner-on B close', axis: '0.6,-1,0.2', angleDeg: 60, dist: 4.5 },
   { tag: 'corner-on A mid', axis: '0.9,-1,0.1', angleDeg: 57, dist: 6 },
   { tag: 'tilted', axis: '0.4,-1,0.5', angleDeg: 65, dist: 5 },
+  { tag: 'corner-on dist3', axis: '-0.55,-1,0.1', angleDeg: 57, dist: 3, tx: 0.05, ty: -0.1 },
+  { tag: 'tilted dist3', axis: '0.4,-1,0.5', angleDeg: 65, dist: 3.2, tx: -0.1, ty: 0.05 },
 ];
 
 const ANGLE_TOL = 8;     // recovered R within this many degrees of truth (mod symmetry)
