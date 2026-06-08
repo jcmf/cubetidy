@@ -175,33 +175,135 @@ function insetQuad(quad2D, g) {
 // cube body shows through the inter-sticker gaps as grid edges; `bg` fills behind it;
 // optional blur/noise approximate a capture. Fills the whole context, so the caller
 // just supplies a correctly-sized canvas.
+//
+// DETERMINISM: we rasterize ourselves (no-AA scanline fill at SxS supersampling, then
+// box-average down) and putImageData ONCE, rather than using ctx.fill(). Canvas2D PATH
+// ANTIALIASING is not reproducible — each backend (browser GPU, browser CPU under
+// willReadFrequently, skia/node) shades the ~1px edge ramp differently, so Canny/Hough
+// sees different segments and the recovered pose drifts (a frame that locks offline can
+// alias live). Our fill + integer downsample are pure IEEE-754 arithmetic, so the SAME
+// url params yield byte-identical pixels — hence identical segments and pose — in the
+// live canvas, the offscreen Save canvas, and the node tools. Supersampling (vs a bare
+// no-AA fill) keeps SMOOTH edges so the detector behaves as it did under native AA;
+// plain staircased edges fragment diagonal grid lines and made some poses alias.
+// (Cross-engine caveat: Math.sin/cos can differ by an ULP off V8, so a non-Chrome
+// browser may shift an occasional edge pixel — still vastly more stable than native AA,
+// and node↔Chrome are both V8 = exact.)
 export function drawScene(ctx, scene, opts = {}) {
   const { width, height, stickers } = scene;
   const gap = opts.gap != null ? +opts.gap : 0.1;
-  const bg = opts.bg || '#15151a';
+  const [br, bgg, bb] = parseColor(opts.bg || '#15151a');
+  const S = Math.max(1, Math.min(4, Math.round(+opts.ss || 3))); // supersample factor (AA quality)
+  const SW = width * S, SH = height * S;
 
-  ctx.fillStyle = bg === 'black' ? '#000' : bg === 'white' ? '#fff' : bg;
-  ctx.fillRect(0, 0, width, height);
-
-  const fillPoly = (pts, style) => {
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-    ctx.closePath();
-    ctx.fillStyle = style;
-    ctx.fill();
-  };
+  // High-res no-AA buffer (reused across frames to avoid per-frame multi-MB allocation).
+  const big = ssBuffer(SW * SH * 4);
+  for (let i = 0, n = SW * SH * 4; i < n; i += 4) { big[i] = br; big[i + 1] = bgg; big[i + 2] = bb; big[i + 3] = 255; }
+  const scaled = (pts) => pts.map(([x, y]) => [x * S, y * S]);
   // Cube body: a black silhouette per visible face (so there's a black rim and black
   // gaps for the grid edges). Painter order doesn't matter — a convex cube's visible
   // faces don't overlap in projection.
-  for (const face of groupByFace(stickers)) fillPoly(face.outline, '#0a0a0a');
-  for (const s of stickers) fillPoly(insetQuad(s.quad2D, gap), `rgb(${s.rgb[0]},${s.rgb[1]},${s.rgb[2]})`);
+  for (const face of groupByFace(stickers)) fillPolygon(big, SW, SH, scaled(face.outline), 10, 10, 10);
+  for (const s of stickers) fillPolygon(big, SW, SH, scaled(insetQuad(s.quad2D, gap)), s.rgb[0], s.rgb[1], s.rgb[2]);
+
+  // Downsample SxS -> 1x by averaging (the deterministic antialiasing).
+  const img = ctx.createImageData(width, height);
+  const data = img.data, inv = 1 / (S * S);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    let r = 0, g = 0, b = 0;
+    for (let dy = 0; dy < S; dy++) { let o = ((y * S + dy) * SW + x * S) * 4; for (let dx = 0; dx < S; dx++, o += 4) { r += big[o]; g += big[o + 1]; b += big[o + 2]; } }
+    const o = (y * width + x) * 4; data[o] = r * inv; data[o + 1] = g * inv; data[o + 2] = b * inv; data[o + 3] = 255;
+  }
 
   // `imgBlur` (alias `blur` for the CLI) — named so it doesn't collide with the
-  // detector's own Canny `blur` knob when ?synth&detect runs both tuning panels.
+  // detector's own Canny `blur` knob when ?synth&detect runs both tuning panels. A
+  // deterministic separable box blur (3 passes ≈ Gaussian) — NOT ctx.filter, which is
+  // backend-dependent and would reintroduce the non-determinism this function avoids.
   const blurPx = +(opts.imgBlur ?? opts.blur ?? 0);
-  if (blurPx > 0) { ctx.filter = `blur(${blurPx}px)`; ctx.drawImage(ctx.canvas, 0, 0); ctx.filter = 'none'; }
-  if (opts.noise && +opts.noise > 0) addNoise(ctx, width, height, +opts.noise, opts.seed);
+  if (blurPx > 0) boxBlur(data, width, height, Math.max(1, Math.round(blurPx)));
+  if (opts.noise && +opts.noise > 0) addNoise(data, +opts.noise, opts.seed);
+
+  ctx.putImageData(img, 0, 0);
+}
+
+// Reused supersample scratch buffer — drawScene runs every rAF frame in ?synth, so we
+// must not allocate a multi-MB typed array each call. Grows monotonically.
+let _ssBuf = null;
+function ssBuffer(n) { if (!_ssBuf || _ssBuf.length < n) _ssBuf = new Uint8ClampedArray(n); return _ssBuf; }
+
+// Parse the handful of bg forms we accept (named black/white, #rgb, #rrggbb, rgb(...))
+// to [r,g,b]; unknown falls back to the default dark grey. Kept tiny on purpose — the
+// software fill needs numeric colours, and synth only ever uses these.
+function parseColor(c) {
+  if (c === 'black') return [0, 0, 0];
+  if (c === 'white') return [255, 255, 255];
+  let m = /^#([0-9a-f]{3})$/i.exec(c);
+  if (m) return [...m[1]].map((h) => parseInt(h + h, 16));
+  m = /^#([0-9a-f]{6})$/i.exec(c);
+  if (m) return [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16));
+  m = /^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/i.exec(c);
+  if (m) return [+m[1], +m[2], +m[3]];
+  return [21, 21, 26];
+}
+
+// No-AA scanline polygon fill into an RGBA buffer. Pixel centres at (x+0.5, y+0.5);
+// each scanline collects edge crossings, sorts them, and fills between pairs (even-odd
+// rule, fine for the convex quads/hulls synth draws). Half-open at the upper vertex
+// (yi<=yc<yj) so shared edges don't double-fill. Pure arithmetic ⇒ backend-independent.
+function fillPolygon(data, W, H, pts, r, g, b) {
+  const n = pts.length;
+  let minY = Infinity, maxY = -Infinity;
+  for (const p of pts) { if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1]; }
+  const y0 = Math.max(0, Math.ceil(minY - 0.5)), y1 = Math.min(H - 1, Math.floor(maxY - 0.5));
+  const xs = [];
+  for (let y = y0; y <= y1; y++) {
+    const yc = y + 0.5;
+    xs.length = 0;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const yi = pts[i][1], yj = pts[j][1];
+      if ((yi <= yc && yj > yc) || (yj <= yc && yi > yc)) {
+        const t = (yc - yi) / (yj - yi);
+        xs.push(pts[i][0] + t * (pts[j][0] - pts[i][0]));
+      }
+    }
+    xs.sort((a, c) => a - c);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      const xL = Math.max(0, Math.ceil(xs[k] - 0.5)), xR = Math.min(W - 1, Math.floor(xs[k + 1] - 0.5));
+      for (let x = xL; x <= xR; x++) { const o = (y * W + x) * 4; data[o] = r; data[o + 1] = g; data[o + 2] = b; }
+    }
+  }
+}
+
+// Deterministic separable box blur, `passes` (3 ≈ Gaussian) of radius `r`, in place.
+function boxBlur(data, W, H, r, passes = 3) {
+  const tmp = new Float64Array(W * H * 3);
+  const win = 2 * r + 1;
+  for (let p = 0; p < passes; p++) {
+    // horizontal
+    for (let y = 0; y < H; y++) {
+      for (let c = 0; c < 3; c++) {
+        let sum = 0;
+        for (let x = -r; x <= r; x++) sum += data[(y * W + Math.min(W - 1, Math.max(0, x))) * 4 + c];
+        for (let x = 0; x < W; x++) {
+          tmp[(y * W + x) * 3 + c] = sum / win;
+          const xo = Math.max(0, x - r), xi = Math.min(W - 1, x + r + 1);
+          sum += data[(y * W + xi) * 4 + c] - data[(y * W + xo) * 4 + c];
+        }
+      }
+    }
+    // vertical
+    for (let x = 0; x < W; x++) {
+      for (let c = 0; c < 3; c++) {
+        let sum = 0;
+        for (let y = -r; y <= r; y++) sum += tmp[(Math.min(H - 1, Math.max(0, y)) * W + x) * 3 + c];
+        for (let y = 0; y < H; y++) {
+          data[(y * W + x) * 4 + c] = sum / win;
+          const yo = Math.max(0, y - r), yi = Math.min(H - 1, y + r + 1);
+          sum += tmp[(yi * W + x) * 3 + c] - tmp[(yo * W + x) * 3 + c];
+        }
+      }
+    }
+  }
 }
 
 // The black-body silhouette of each visible face = the convex hull of its projected
@@ -233,14 +335,14 @@ function padHull(hull, px) {
   return hull.map(([x, y]) => { const d = Math.hypot(x - cx, y - cy) || 1; return [x + (x - cx) / d * px, y + (y - cy) / d * px]; });
 }
 
-function addNoise(ctx, w, h, sigma, seed) {
-  const img = ctx.getImageData(0, 0, w, h);
+// Add seeded triangular (~Gaussian) luminance noise in place, on the RGBA buffer. Seeded
+// so it's deterministic: the same `seed` (default 7) reproduces the same field.
+function addNoise(data, sigma, seed) {
   const rand = rng((+seed || 7) ^ 0x9e3779b9);
-  for (let i = 0; i < img.data.length; i += 4) {
+  for (let i = 0; i < data.length; i += 4) {
     const n = (rand() + rand() - 1) * sigma * 2; // triangular ≈ gaussian, scaled to ~sigma
-    img.data[i] = Math.max(0, Math.min(255, img.data[i] + n));
-    img.data[i + 1] = Math.max(0, Math.min(255, img.data[i + 1] + n));
-    img.data[i + 2] = Math.max(0, Math.min(255, img.data[i + 2] + n));
+    data[i] = Math.max(0, Math.min(255, data[i] + n));
+    data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + n));
+    data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + n));
   }
-  ctx.putImageData(img, 0, 0);
 }
