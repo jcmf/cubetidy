@@ -11,6 +11,7 @@
     "preview:update": "node tools/preview.mjs --update",
     "synth": "node tools/synth-cube.mjs",
     "synth:check": "node tools/synth-smoke.mjs",
+    "synth:bench": "node tools/synth-bench.mjs",
     "test": "node test/pipeline.test.mjs && node test/scan-geometry.test.mjs && node test/corner-geometry.test.mjs && node test/colors.test.mjs && node test/pose.test.mjs && node test/group.test.mjs && node test/cube-pose.test.mjs && node test/lines.test.mjs"
   },
   "license": "MIT",

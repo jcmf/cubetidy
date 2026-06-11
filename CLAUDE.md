@@ -138,7 +138,19 @@ gaps / next steps:
     REAL `detectLineSegments`→`solveCubeFromLines`, and grades the recovered pose
     against truth (lock + rotation mod the 24 symmetries + centre + depth). Loads the
     OpenCV WASM, so like `detect-smoke` it is NOT part of `npm test`. CLI outputs go to
-    `samples/synth/` (git-ignored); `hough-image.mjs` points straight at them. The
+    `samples/synth/` (git-ignored); `hough-image.mjs` points straight at them.
+    `tools/synth-bench.mjs` (`npm run synth:bench`, ~18s) scales that into a MEASURING
+    benchmark (smoke = pass/fail gate, bench = rates/medians): a deterministic
+    100-scene matrix (5 views × 4 dists × clean/blur/noise/soft/scramble looks, seeded
+    pose jitter), graded into tiers derived from true geometry — `core` (3 faces,
+    dist 3–6, expect accurate lock), `edge` (2 faces), `far` (dist 9, out of regime:
+    only FALSE locks count against). Adds a cell-hit-rate end-task metric ("would the
+    colour reader sample the right sticker"). Writes JSON; `baseline=<prev.json>`
+    diffs per-scene outcomes and exits 1 on regressions; problem scenes print a
+    `synth-cube.mjs` repro command (`dump=1` also writes their PNGs); unknown
+    `key=val`s pass through to the detector, so a knob's aggregate effect is one run.
+    Known weakness it exposes (2026-06): `imgBlur=2` triggers one-cell translation
+    aliasing on ~10 scenes (rotation ~1–4° fine, centre ≈ ⅓ edge off, cell-hit 0%). The
     scene/draw core is BROWSER-SAFE (no skia/fs — those stay in the CLI) and shared
     with the in-page **`?synth`** harness (`main.js`): a synthetic cube replaces the
     camera as the frame source, with a tuning panel on the LEFT (pose/appearance
