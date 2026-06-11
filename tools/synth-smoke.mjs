@@ -16,8 +16,8 @@
 import { Canvas } from 'skia-canvas';
 import cv from '@techstark/opencv-js';
 import { buildCubeScene, renderScene } from './synth-cube.mjs';
-import { detectLineSegments } from '../src/detect.js';
-import { solveCubeFromLines, canonicalizeRotation, rotationAngleDeg } from '../src/lines.js';
+import { detectAndSolveLines } from '../src/detect.js';
+import { canonicalizeRotation, rotationAngleDeg } from '../src/lines.js';
 import { project } from '../src/pose.js';
 
 await new Promise((r) => { if (cv && cv.Mat) return r(); cv.onRuntimeInitialized = r; });
@@ -54,11 +54,11 @@ for (const spec of SCENES) {
   const ctx = canvas.getContext('2d');
   const imageData = ctx.getImageData(0, 0, scene.width, scene.height);
 
-  const segments = detectLineSegments(cv, imageData, {});
-  const sol = solveCubeFromLines(segments, scene.K, {});
+  // The worker-identical entry point (includes the soft-frame Canny retry).
+  const { segments, sol, retried } = detectAndSolveLines(cv, imageData, scene.K, {});
   const fit = sol && sol.fit;
 
-  console.log(`\n[${spec.tag}] ${segments.length} segments | ${fit ? `${fit.locked ? 'LOCK' : 'unlocked'} ${fit.count}pts cover ${(fit.cover || 0).toFixed(2)} reproj ${fit.reprojErr?.toFixed?.(1)}px` : 'no fit'}`);
+  console.log(`\n[${spec.tag}] ${segments.length} segments${retried ? ' (retry)' : ''} | ${fit ? `${fit.locked ? 'LOCK' : 'unlocked'} ${fit.count}pts cover ${(fit.cover || 0).toFixed(2)} reproj ${fit.reprojErr?.toFixed?.(1)}px` : 'no fit'}`);
 
   if (!check(`[${spec.tag}] locks`, !!(fit && fit.locked), 'no lock')) continue;
 

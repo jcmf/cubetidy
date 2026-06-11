@@ -19,6 +19,8 @@
 // it live from the URL. All OpenCV Mats are explicitly deleted: this runs in the
 // worker per frame and the Emscripten heap is not garbage-collected.
 
+import { solveCubeFromLines, gridCoverScore } from './lines.js';
+
 export const DETECT_DEFAULTS = {
   method: 'canny',      // 'canny' | 'mask'
   blur: 5,              // Gaussian blur kernel (odd); tames sensor noise
@@ -64,6 +66,11 @@ export const HOUGH_DEFAULTS = {
                       //   minLineFrac to scale with frame size instead.
   minLineFrac: 0,     // if > 0, minLineLen = minLineFrac * min(width,height)
   maxLineGap: 10,     // bridge gaps up to this (px) into one segment
+  retryCannyLo: 20,   // detectAndSolveLines: when the crisp solve is suspect, re-detect
+  retryCannyHi: 60,   //   once at these softer thresholds (0 = no retry).
+  retryBalance: 0.4,  // a lock is suspect if min/max family length is below this
+  retryMinCover: 0.7, // a retry-only lock must clear this cover (gate alone is too lax)
+  retryMargin: 1.05,  // when both passes lock, retry must win cross-eval by this factor
 };
 
 // Canny + probabilistic Hough (HoughLinesP) line-segment explorer. Returns an
@@ -96,6 +103,55 @@ export function detectLineSegments(cv, imageData, opts = {}) {
     src.delete(); gray.delete(); edges.delete(); lines.delete();
   }
   return segments;
+}
+
+// Detect line segments AND solve the cube pose, with a soft-frame fallback. One fixed
+// Canny pair can't serve both frame kinds: 40/120 loses the thin inter-sticker gap
+// edges on blurred/defocused frames — one line family STARVES and the periodic grid's
+// translation aliases a cell sideways, often still LOCKING confidently — while 20/60
+// everywhere floods cluttered crisp frames with segments and breaks their locks
+// (e.g. samples/corner2). So: solve at the crisp pair first, and re-detect at the
+// softer retryCannyLo/Hi when that result is SUSPECT — no lock, or a lock whose
+// weakest family carries under retryBalance of the strongest (the starved-family
+// blur signature; measured ≤0.32 on every aliased lock, while healthy locks sit
+// higher). The retry result is then held to a harder standard than the plain gate:
+//   · retry-only lock (crisp pass missed): adopt only with cover ≥ retryMinCover —
+//     at the soft thresholds the standard gate alone passes occasional wrong locks
+//     (cover ≤0.68 measured) that a real in-regime lock clears (≥0.74).
+//   · both passes locked: cross-evaluate the two POSES on the union of both segment
+//     sets (gridCoverScore — same evidence for both, so clutter dilution cancels;
+//     the aliased pose misses the grid lines the retry recovered) and switch only if
+//     the retry wins by retryMargin.
+// A frame with no cube locks at neither threshold, so the retry cannot manufacture
+// a lock the gate+bar wouldn't accept. This is THE entry point shared by the live
+// worker (cv-worker.js) and the offline tools (synth-bench/synth-smoke/hough-image),
+// so they retry identically. Returns { segments, sol, retried }.
+export function detectAndSolveLines(cv, imageData, K, opts = {}) {
+  const o = { ...HOUGH_DEFAULTS, ...opts };
+  const segments = detectLineSegments(cv, imageData, opts);
+  const sol = solveCubeFromLines(segments, K, opts);
+  const fit = sol && sol.fit;
+  const locked1 = !!(fit && fit.locked);
+  const pass1 = { segments, sol, retried: false };
+  if (!(o.retryCannyLo > 0)) return pass1;
+
+  let balance = 0;
+  if (sol) {
+    const lens = sol.rot.families.map((f) => f.segments.reduce((a, s) => a + Math.hypot(s.x2 - s.x1, s.y2 - s.y1), 0));
+    balance = Math.min(...lens) / (Math.max(...lens) || 1);
+  }
+  if (locked1 && balance >= o.retryBalance) return pass1;
+
+  const low = { ...opts, cannyLo: o.retryCannyLo, cannyHi: o.retryCannyHi };
+  const seg2 = detectLineSegments(cv, imageData, low);
+  const sol2 = solveCubeFromLines(seg2, K, low);
+  const fit2 = sol2 && sol2.fit;
+  if (!(fit2 && fit2.locked)) return pass1;
+  const pass2 = { segments: seg2, sol: sol2, retried: true };
+
+  if (!locked1) return fit2.cover >= o.retryMinCover ? pass2 : pass1;
+  const union = segments.concat(seg2);
+  return gridCoverScore(K, fit2.pose, union) > gridCoverScore(K, fit.pose, union) * o.retryMargin ? pass2 : pass1;
 }
 
 // Find candidate sticker quads in an ImageData. Returns an array of

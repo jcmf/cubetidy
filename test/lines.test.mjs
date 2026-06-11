@@ -11,7 +11,7 @@
 
 import {
   groupLineSegments, estimateRotationFromLines, recoverCubePose, solveCubeFromLines,
-  fitVanishingPoint, lineVPError,
+  fitVanishingPoint, lineVPError, gridCoverScore,
   smoothLinePose, canonicalizeRotation, rotationAngleDeg, CUBE_ROTATIONS,
 } from '../src/lines.js';
 import { estimateIntrinsics, project } from '../src/pose.js';
@@ -319,6 +319,33 @@ function cubeGridSegments(R, t, rand) {
     check('pose: recovers metric translation', dt / Math.hypot(...t) < 0.1, `rel dt=${(dt / Math.hypot(...t)).toFixed(3)}`);
     check('pose: tight reprojection', est.reprojErr < 0.05 * est.edgePx, `err=${est.reprojErr.toFixed(2)} edge=${est.edgePx.toFixed(0)}`);
   }
+})();
+
+(() => {
+  // gridCoverScore: the truth-free cross-evaluation detectAndSolveLines uses to
+  // arbitrate between the crisp- and soft-threshold solves. The property it must
+  // have: on the same segment set, the TRUE pose outscores a one-cell-shifted alias
+  // by more than the adoption margin (1.05) — the alias leaves whole grid lines
+  // uncovered — and clutter mixed into the set dilutes both scores without flipping
+  // the order (it cancels in the comparison).
+  const R = rotationAxisAngle([0.9, -1, 0.1], 1.0);
+  const t = [0.2, -0.1, 6];
+  const rand = rng(77);
+  const segments = cubeGridSegments(R, t, rand);
+  const sTrue = gridCoverScore(K, { R, t }, segments);
+  // One-cell hop along a cube axis: t' = t + R·(1/3, 0, 0).
+  const tAlias = [t[0] + R[0][0] / 3, t[1] + R[1][0] / 3, t[2] + R[2][0] / 3];
+  const sAlias = gridCoverScore(K, { R, t: tAlias }, segments);
+  check('cross-eval: true pose covers its grid', sTrue > 0.9, `s=${sTrue.toFixed(3)}`);
+  check('cross-eval: beats the one-cell alias past the margin', sTrue > sAlias * 1.05, `true=${sTrue.toFixed(3)} alias=${sAlias.toFixed(3)}`);
+  const withClutter = [...segments];
+  for (let m = 0; m < 25; m++) {
+    const x = rand() * W, y = rand() * H, ang = rand() * Math.PI, L = 25 + rand() * 60;
+    withClutter.push({ x1: x, y1: y, x2: x + Math.cos(ang) * L, y2: y + Math.sin(ang) * L });
+  }
+  const cTrue = gridCoverScore(K, { R, t }, withClutter);
+  const cAlias = gridCoverScore(K, { R, t: tAlias }, withClutter);
+  check('cross-eval: clutter dilutes but does not flip the order', cTrue > cAlias * 1.05, `true=${cTrue.toFixed(3)} alias=${cAlias.toFixed(3)}`);
 })();
 
 (() => {

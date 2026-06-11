@@ -4,7 +4,7 @@ import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
 import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawCube, drawSegments, drawLineGroups, drawCubeWireframe } from './overlay.js';
 import { glyphSVG } from './glyph.js';
-import { startCV, cvReady, requestDetect, latestQuads, latestSegments } from './opencv.js';
+import { startCV, cvReady, requestDetect, latestQuads, latestSegments, latestLineSol } from './opencv.js';
 import { findFaceGrids, fitFaceGrid } from './group.js';
 import { estimateCubePose } from './cube-pose.js';
 import { estimateIntrinsics, project } from './pose.js';
@@ -87,6 +87,13 @@ const DETECT_PARAMS = [
   { k: 'minLineLen',  label: 'Min line len',   min: 0,      max: 300, step: 1,      methods: ['hough'] },
   { k: 'minLineFrac', label: 'Min line frac',  min: 0,      max: 0.3, step: 0.005,  methods: ['hough'] },
   { k: 'maxLineGap',  label: 'Max line gap',   min: 0,      max: 50,  step: 1,      methods: ['hough'] },
+  // soft-frame fallback: when the solve is suspect (no lock, or a starved family),
+  // re-detect once at these gentler Canny thresholds (blur kills the thin gap edges
+  // at the crisp pair) and arbitrate via gridCoverScore (see detectAndSolveLines).
+  { k: 'retryCannyLo', label: 'Retry low',     min: 0,      max: 255, step: 1,      methods: ['hough'] },
+  { k: 'retryCannyHi', label: 'Retry high',    min: 0,      max: 300, step: 1,      methods: ['hough'] },
+  { k: 'retryBalance', label: 'Retry balance', min: 0,      max: 1,   step: 0.05,   methods: ['hough'] },
+  { k: 'retryMinCover', label: 'Retry cover',  min: 0.3,    max: 1,   step: 0.05,   methods: ['hough'] },
   // vanishing-point grouping (step 1) + orthogonal-frame rotation search (step 2)
   { k: 'vpMaxErrorDeg', label: 'VP max err°',  min: 0.5,    max: 15,  step: 0.5,    methods: ['hough'] },
   { k: 'vpIters',     label: 'VP iters',       min: 1,      max: 12,  step: 1,      methods: ['hough'] },
@@ -315,7 +322,10 @@ function drawDetectResults() {
     if (segments !== detectState.lastSegments) {
       detectState.lastSegments = segments;
       detectState.K = estimateIntrinsics(canvas.width, canvas.height);
-      detectState.sol = solveCubeFromLines(segments, detectState.K, detectOpts);
+      // The worker already solved these segments (incl. the soft-frame Canny retry,
+      // which only it can do — the retry re-runs detection). Fall back to solving
+      // here only if the message predates the worker carrying a sol.
+      detectState.sol = latestLineSol() ?? solveCubeFromLines(segments, detectState.K, detectOpts);
       detectState.grouping = detectState.sol ? detectState.sol.rot : groupLineSegments(segments, detectOpts);
       // Temporally fuse the locked pose (reject the intermittent wrong locks, hold
       // through dropouts) so the overlay is steady instead of flickering right/wrong.

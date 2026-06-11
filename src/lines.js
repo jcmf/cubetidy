@@ -705,6 +705,53 @@ export function recoverCubePose(rot, K, opts = {}) {
   return { pose, count: fin.X3.length, reprojErr: err, edgePx, extRatio, cover, locked };
 }
 
+// Truth-free CROSS-EVALUATION of a pose against ANY segment set: the fraction of
+// detected line length lying on the pose's projected grid lines (same soft distance
+// ramp as recoverCubePose's coverage, tol 0.22·cell). Unlike that internal coverage
+// it needs no VP family assignment — each segment may match any grid line within 30°
+// of its own image direction — so two poses recovered from DIFFERENT segment sets
+// can be scored on the same evidence (detectAndSolveLines uses it to arbitrate the
+// crisp vs soft-threshold solves: the wrong-cell alias misses whole recovered grid
+// lines, while clutter in the set dilutes both scores equally and cancels).
+export function gridCoverScore(K, pose, segments, opts = {}) {
+  if (!segments.length) return 0;
+  const tol = (opts.coverTolFrac ?? 0.22) * (edgePixels(K, pose) / 3 || 1);
+  const lines2D = [];
+  for (const f of visibleFaces(pose.R, pose.t)) {
+    const inplane = [0, 1, 2].filter((i) => i !== f.k);
+    for (const along of inplane) {
+      const off = inplane.find((i) => i !== along);
+      for (const g of GRID_OFFSETS) {
+        const A = [0, 0, 0], B = [0, 0, 0];
+        A[f.k] = B[f.k] = f.s * 0.5; A[off] = B[off] = g; A[along] = -0.5; B[along] = 0.5;
+        const a = project(K, pose, A), b = project(K, pose, B);
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+        const n = Math.hypot(a[1] - b[1], b[0] - a[0]) || 1;
+        lines2D.push({
+          a: (a[1] - b[1]) / n, b: (b[0] - a[0]) / n, c: (a[0] * b[1] - b[0] * a[1]) / n,
+          dx: (b[0] - a[0]) / len, dy: (b[1] - a[1]) / len,
+        });
+      }
+    }
+  }
+  const COS30 = Math.cos(Math.PI / 6);
+  let sc = 0, tot = 0;
+  for (const s of segments) {
+    const len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1) || 1;
+    const mx = (s.x1 + s.x2) / 2, my = (s.y1 + s.y2) / 2;
+    const ux = (s.x2 - s.x1) / len, uy = (s.y2 - s.y1) / len;
+    let d = Infinity;
+    for (const L of lines2D) {
+      if (Math.abs(ux * L.dx + uy * L.dy) < COS30) continue; // direction gate (mod 180°)
+      const dd = Math.abs(L.a * mx + L.b * my + L.c);
+      if (dd < d) d = dd;
+    }
+    sc += len * Math.max(0, 1 - d / tol);
+    tot += len;
+  }
+  return sc / tot;
+}
+
 // Full line→cube solve. The inlier angle that yields a good orthogonal frame varies
 // frame to frame (noisier lines want a looser angle; a looser angle elsewhere lets a
 // wrong frame win), and no single value is reliable across consecutive frames. So

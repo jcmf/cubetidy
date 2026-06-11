@@ -35,6 +35,10 @@
 //         and expected; what is graded is FALSE LOCKS — a confident wrong overlay is
 //         the one truly bad outcome out there.
 //
+// Each scene runs detectAndSolveLines — the worker-identical entry point, including
+// the soft-frame Canny retry; scenes that only locked via the retry are marked `*`
+// after the segment count.
+//
 // Per-scene grading (same tolerances as synth-smoke): locked; rotation error mod the
 // 24 cube symmetries ≤ 8°; projected centre ≤ 0.25·edge; depth ≤ 18%. Plus a stricter
 // end-task metric, CELL HIT RATE: the fraction of visible sticker centres that
@@ -50,8 +54,8 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import cv from '@techstark/opencv-js';
 import { buildCubeScene, renderScene } from './synth-cube.mjs';
-import { detectLineSegments } from '../src/detect.js';
-import { solveCubeFromLines, canonicalizeRotation, rotationAngleDeg } from '../src/lines.js';
+import { detectAndSolveLines } from '../src/detect.js';
+import { canonicalizeRotation, rotationAngleDeg } from '../src/lines.js';
 import { project } from '../src/pose.js';
 
 const ANGLE_TOL = 8;     // recovered R within this many degrees of truth (mod symmetry)
@@ -128,10 +132,9 @@ function gradeScene(spec, detOpts) {
   const imageData = canvas.getContext('2d').getImageData(0, 0, scene.width, scene.height);
 
   const t0 = performance.now();
-  const segments = detectLineSegments(cv, imageData, detOpts);
+  // The real entry point (worker-identical), including the soft-frame Canny retry.
+  const { segments, sol, retried } = detectAndSolveLines(cv, imageData, scene.K, detOpts);
   const t1 = performance.now();
-  const sol = solveCubeFromLines(segments, scene.K, detOpts);
-  const t2 = performance.now();
 
   const fit = sol && sol.fit;
   // Tier from the scene's TRUE geometry: far is distance-based, otherwise the actual
@@ -140,7 +143,7 @@ function gradeScene(spec, detOpts) {
   const rec = {
     id: spec.id, tier, params: spec.params,
     faces: scene.truth.visibleFaces.map((f) => f.letter).join(''),
-    segments: segments.length, detectMs: Math.round(t1 - t0), solveMs: Math.round(t2 - t1),
+    segments: segments.length, ms: Math.round(t1 - t0), retried,
     locked: !!(fit && fit.locked), accurate: false,
   };
   if (fit) {
@@ -194,7 +197,7 @@ function summarize(records) {
   for (const r of records) {
     const t = (tiers[r.tier] ??= { n: 0, locked: 0, accurate: 0, falseLocks: 0, rot: [], ctr: [], dep: [], cell: [], ms: [] });
     t.n++;
-    t.ms.push(r.detectMs + r.solveMs);
+    t.ms.push(r.ms);
     if (r.locked) {
       t.locked++;
       r.accurate ? t.accurate++ : t.falseLocks++;
@@ -212,7 +215,7 @@ const tierStats = (t) => ({
 
 function sceneLine(r) {
   const tag = { accurate: '  ok ', miss: ' MISS', falseLock: 'FALSE' }[r.outcome];
-  let s = `${tag}  ${r.id.padEnd(24)} ${r.tier.padEnd(4)} ${pad(r.segments, 3)}seg`;
+  let s = `${tag}  ${r.id.padEnd(24)} ${r.tier.padEnd(4)} ${pad(r.segments, 3)}seg${r.retried ? '*' : ' '}`;
   if (r.locked) {
     s += `  rot ${fmt(r.rotErrDeg)}°  ctr ${fmt(r.centreErrEdge, 2)}·e  dep ${fmt(r.depthErrFrac * 100, 0)}%`
       + `  cell ${fmt(r.cellHitRate * 100, 0)}%  cover ${fmt(r.cover, 2)}`;

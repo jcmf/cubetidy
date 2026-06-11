@@ -11,6 +11,7 @@ let ready = false;
 let inFlight = false;
 let latest = [];
 let latestSeg = [];
+let latestSol = null;
 
 export function startCV() {
   if (worker) return;
@@ -29,6 +30,7 @@ export function startCV() {
       inFlight = false;
       if (!latestSeg.length && msg.segments.length) console.log('[cv] first detection:', msg.segments.length, 'line segments');
       latestSeg = msg.segments;
+      latestSol = msg.sol ?? null;
     } else if (msg.type === 'error') { inFlight = false; console.warn('[cv] worker error:', msg.message); }
   };
   worker.onerror = (e) => console.warn('[cv] worker onerror', e.message || e);
@@ -54,3 +56,7 @@ export function latestQuads() { return latest; }
 
 // The most recent Hough line segments (method=hough), drawn every frame.
 export function latestSegments() { return latestSeg; }
+
+// The line solve the worker ran on those segments (same message), so the main
+// thread doesn't repeat it. Null until the first hough result arrives.
+export function latestLineSol() { return latestSol; }

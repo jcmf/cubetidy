@@ -16,7 +16,8 @@
 //
 // detect.js is cv-injected and DOM-free, so it runs here unchanged.
 
-import { detectStickerQuads, detectLineSegments } from './detect.js';
+import { detectStickerQuads, detectAndSolveLines } from './detect.js';
+import { estimateIntrinsics } from './pose.js';
 import cvModule from '@techstark/opencv-js';
 
 const cv = cvModule?.default ?? cvModule; // tolerate either interop shape
@@ -39,9 +40,15 @@ self.onmessage = (e) => {
   const imageData = { width: msg.width, height: msg.height, data: new Uint8ClampedArray(msg.buffer) };
   try {
     // method=hough is the Canny + probabilistic-Hough line explorer; it returns
-    // line segments instead of sticker quads. Everything else is the quad detector.
+    // line segments instead of sticker quads. The full SOLVE (lines.js is pure JS,
+    // no cv/DOM) runs here too: that keeps the soft-frame Canny retry inside
+    // detectAndSolveLines — which must re-run detection, so only this side can do
+    // it — and moves the RANSAC/refine cost off the UI thread. The main thread
+    // draws from the posted sol instead of re-solving.
     if (msg.opts && msg.opts.method === 'hough') {
-      postMessage({ type: 'segments', segments: detectLineSegments(cv, imageData, msg.opts) });
+      const K = estimateIntrinsics(msg.width, msg.height);
+      const { segments, sol } = detectAndSolveLines(cv, imageData, K, msg.opts);
+      postMessage({ type: 'segments', segments, sol });
     } else {
       postMessage({ type: 'quads', quads: detectStickerQuads(cv, imageData, msg.opts) });
     }

@@ -149,8 +149,10 @@ gaps / next steps:
     diffs per-scene outcomes and exits 1 on regressions; problem scenes print a
     `synth-cube.mjs` repro command (`dump=1` also writes their PNGs); unknown
     `key=val`s pass through to the detector, so a knob's aggregate effect is one run.
-    Known weakness it exposes (2026-06): `imgBlur=2` triggers one-cell translation
-    aliasing on ~10 scenes (rotation ~1–4° fine, centre ≈ ⅓ edge off, cell-hit 0%). The
+    First find (2026-06): `imgBlur=2` triggered one-cell translation aliasing on ~10
+    scenes — fixed by the step-3e adaptive Canny retry; scenes that locked via the
+    retry are marked `*`. Remaining in-regime gap: rare wrong-R locks under heavy
+    blur+noise (`tilted-d4.5-soft`). The
     scene/draw core is BROWSER-SAFE (no skia/fs — those stay in the CLI) and shared
     with the in-page **`?synth`** harness (`main.js`): a synthetic cube replaces the
     camera as the frame source, with a tuning panel on the LEFT (pose/appearance
@@ -250,6 +252,27 @@ gaps / next steps:
     reprojection. R still comes from the VPs (unchanged). Result on the `ceiling1-6`
     samples: all lock tight (reproj ~2-6% of edge) and consistent (edge spread 18%→6%),
     grid overlays the detected lines. Knob `minCover`. Verify live steadiness/accuracy.
+  - **Step 3e (done): adaptive Canny retry for soft frames** (`detectAndSolveLines` in
+    `detect.js` — now THE entry point, shared by the worker and all offline tools; the
+    WORKER also runs the solve now and posts `sol` with the segments, so the retry can
+    re-run detection and the RANSAC cost leaves the UI thread — `main.js` reads
+    `latestLineSol()`). Found by synth-bench: on blurred/defocused frames the crisp
+    Canny pair (40/120) loses the thin inter-sticker gap edges on oblique faces, ONE
+    VP family starves (min/max family length ≤0.32 on every aliased lock), and the
+    periodic grid CONFIDENTLY locks a cell sideways — while 20/60 everywhere floods
+    cluttered crisp frames and breaks their locks (corner2). Neither scoring tweak nor
+    margin tuning fixes this geometrically (measured: per-family-normalized coverage
+    does NOT separate the alias — the 8-line model comb at tol 0.22·cell is too dense),
+    so the fix is at DETECTION level: re-detect at `retryCannyLo/Hi` (20/60) when the
+    crisp solve is suspect (no lock, or family balance < `retryBalance`), then hold the
+    retry to a harder standard than the gate: a retry-ONLY lock needs cover ≥
+    `retryMinCover` (0.7 — wrong soft locks measured ≤0.68, real ones ≥0.74); when BOTH
+    passes lock, `gridCoverScore` (exported, lines.js, tested) cross-evaluates the two
+    POSES on the union of both segment sets (same evidence ⇒ clutter dilution cancels;
+    the aliased pose misses the recovered gap lines) and the retry must win by
+    `retryMargin`. Result: bench in-regime false locks 10→1 (the 1 is a wrong-R case,
+    a different failure class), all real-frame locks/non-locks unchanged (ceiling3's
+    retry even pulls its edge estimate in line with its burst siblings).
   - **Next:** read sticker colours off the locked grid cells to assemble the facelet
     string (the 24-fold R disambiguates once colours are known).
 - The `?detect` harness has an **on-page tuning panel** (`buildDetectPanel` in

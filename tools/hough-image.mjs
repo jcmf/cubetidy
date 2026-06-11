@@ -20,8 +20,8 @@ import { basename, dirname, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import cv from '@techstark/opencv-js';
 import { estimateIntrinsics } from '../src/pose.js';
-import { detectLineSegments } from '../src/detect.js';
-import { groupLineSegments, solveCubeFromLines } from '../src/lines.js';
+import { detectLineSegments, detectAndSolveLines } from '../src/detect.js';
+import { groupLineSegments } from '../src/lines.js';
 import { drawSegments, drawLineGroups, drawCubeWireframe } from '../src/overlay.js';
 
 await new Promise((r) => { if (cv && cv.Mat) return r(); cv.onRuntimeInitialized = r; });
@@ -45,28 +45,32 @@ for (const p of paths) {
   ctx.drawImage(img, 0, 0);
   const imageData = ctx.getImageData(0, 0, img.width, img.height);
 
-  const segments = detectLineSegments(cv, imageData, opts);
   if (opts.bg === 'black') { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, img.width, img.height); }
   // raw=1: ungrouped orientation-hued segments. Otherwise run the line detector — the
   // orthogonal-VP rotation search (step 2): colour by family + draw the orientation
   // wireframe. group=1 forces the free step-1 grouping instead (no rotation).
-  let info;
+  let info, segments;
   if (opts.raw) {
+    segments = detectLineSegments(cv, imageData, opts);
     drawSegments(ctx, segments, 3); // thicker than live 2px so it survives downscaling
     info = `${segments.length} segments`;
   } else if (opts.group) {
+    segments = detectLineSegments(cv, imageData, opts);
     const g = groupLineSegments(segments, opts);
     drawLineGroups(ctx, g);
     info = `${segments.length} segs | families ${g.families.map((f) => f.segments.length).join('/')} | ${g.outliers.length} outliers`;
   } else {
+    // The worker-identical entry point, including the soft-frame Canny retry; the
+    // drawn segments are the set the kept solve actually used.
     const K = estimateIntrinsics(img.width, img.height);
-    const sol = solveCubeFromLines(segments, K, opts);
+    const { segments: seg, sol, retried } = detectAndSolveLines(cv, imageData, K, opts);
+    segments = seg;
     const g = sol ? sol.rot : groupLineSegments(segments, opts);
     drawLineGroups(ctx, g);
     const P = sol && sol.fit;
     if (P && P.locked) drawCubeWireframe(ctx, K, P.pose, '#39ff14');
     else if (sol && sol.rot.pose) drawCubeWireframe(ctx, K, sol.rot.pose, 'rgba(150,160,175,0.7)');
-    info = `${segments.length} segs | families ${g.families.map((f) => f.segments.length).join('/')} | ${g.outliers.length} out | `
+    info = `${segments.length} segs${retried ? ' (retry)' : ''} | families ${g.families.map((f) => f.segments.length).join('/')} | ${g.outliers.length} out | `
       + (!sol ? 'no R' : !P ? 'R only' : `${P.locked ? 'LOCK' : 'unlocked'} ${P.count}pts ${P.reprojErr.toFixed(1)}px / edge ${P.edgePx.toFixed(0)}`);
   }
 
