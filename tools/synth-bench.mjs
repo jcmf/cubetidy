@@ -57,6 +57,7 @@ import { buildCubeScene, renderScene } from './synth-cube.mjs';
 import { detectAndSolveLines } from '../src/detect.js';
 import { canonicalizeRotation, rotationAngleDeg } from '../src/lines.js';
 import { project } from '../src/pose.js';
+import { readStickerColors, nearestFaceLetter } from '../src/read-colors.js';
 
 const ANGLE_TOL = 8;     // recovered R within this many degrees of truth (mod symmetry)
 const CENTRE_TOL = 0.25; // projected centre within this fraction of the cube edge
@@ -176,6 +177,29 @@ function gradeScene(spec, detOpts) {
     }
     rec.cellHitRate = +(hits / scene.stickers.length).toFixed(3);
 
+    // Colour read — the end-task run for real: sample sticker colours under the
+    // recovered (truth-aligned) pose with the actual reader. Two numbers, split by
+    // the reader's own confidence: colorRate = precision over the cells it CLAIMS
+    // (weight > 0 — a claimed-but-wrong colour is the bad outcome), colorCover =
+    // the fraction of visible truth cells claimed (weight-0 cells are declared
+    // no-reads: grazing faces, off-frame patches — the accumulator's job, not a
+    // misread). Subsumes cellHitRate's "right sticker" with "right colour".
+    const reads = readStickerColors(imageData, scene.K, poseC, detOpts);
+    const byFace = new Map(reads.faces.map((f) => [`${f.k}${f.s}`, f]));
+    let colOk = 0, claimed = 0, colN = 0;
+    for (const g of scene.truth.facelets) {
+      const rf = byFace.get(`${g.k}${g.s}`);
+      g.cells.forEach((row, r) => row.forEach((cell, c) => {
+        colN++;
+        const rc = rf && rf.cells[r * 3 + c];
+        if (!rc || !(rc.weight > 0)) return;
+        claimed++;
+        if (nearestFaceLetter(rc.rgb) === cell.letter) colOk++;
+      }));
+    }
+    rec.colorRate = +(colOk / (claimed || 1)).toFixed(3);
+    rec.colorCover = +(claimed / (colN || 1)).toFixed(3);
+
     rec.accurate = rec.rotErrDeg <= ANGLE_TOL && rec.centreErrEdge <= CENTRE_TOL && rec.depthErrFrac <= DEPTH_TOL;
   }
   rec.outcome = !rec.locked ? 'miss' : rec.accurate ? 'accurate' : 'falseLock';
@@ -195,13 +219,13 @@ const pad = (s, w) => String(s).padStart(w);
 function summarize(records) {
   const tiers = {};
   for (const r of records) {
-    const t = (tiers[r.tier] ??= { n: 0, locked: 0, accurate: 0, falseLocks: 0, rot: [], ctr: [], dep: [], cell: [], ms: [] });
+    const t = (tiers[r.tier] ??= { n: 0, locked: 0, accurate: 0, falseLocks: 0, rot: [], ctr: [], dep: [], cell: [], col: [], cov: [], ms: [] });
     t.n++;
     t.ms.push(r.ms);
     if (r.locked) {
       t.locked++;
       r.accurate ? t.accurate++ : t.falseLocks++;
-      t.rot.push(r.rotErrDeg); t.ctr.push(r.centreErrEdge); t.dep.push(r.depthErrFrac); t.cell.push(r.cellHitRate);
+      t.rot.push(r.rotErrDeg); t.ctr.push(r.centreErrEdge); t.dep.push(r.depthErrFrac); t.cell.push(r.cellHitRate); t.col.push(r.colorRate); t.cov.push(r.colorCover);
     }
   }
   return tiers;
@@ -210,7 +234,7 @@ function summarize(records) {
 const tierStats = (t) => ({
   n: t.n, locked: t.locked, accurate: t.accurate, falseLocks: t.falseLocks,
   medRotErrDeg: median(t.rot), medCentreErrEdge: median(t.ctr), medDepthErrFrac: median(t.dep),
-  medCellHitRate: median(t.cell), medMs: median(t.ms),
+  medCellHitRate: median(t.cell), medColorRate: median(t.col), medColorCover: median(t.cov), medMs: median(t.ms),
 });
 
 function sceneLine(r) {
@@ -218,7 +242,7 @@ function sceneLine(r) {
   let s = `${tag}  ${r.id.padEnd(24)} ${r.tier.padEnd(4)} ${pad(r.segments, 3)}seg${r.retried ? '*' : ' '}`;
   if (r.locked) {
     s += `  rot ${fmt(r.rotErrDeg)}°  ctr ${fmt(r.centreErrEdge, 2)}·e  dep ${fmt(r.depthErrFrac * 100, 0)}%`
-      + `  cell ${fmt(r.cellHitRate * 100, 0)}%  cover ${fmt(r.cover, 2)}`;
+      + `  cell ${fmt(r.cellHitRate * 100, 0)}%  col ${fmt(r.colorRate * 100, 0)}%@${fmt(r.colorCover * 100, 0)}  cover ${fmt(r.cover, 2)}`;
   }
   return s;
 }
@@ -294,12 +318,12 @@ if (!opts.verbose) console.log();
 // Summary table: counts per tier, then medians over the LOCKED scenes of that tier.
 const tiers = summarize(records);
 const order = ['core', 'edge', 'far'].filter((k) => tiers[k]);
-console.log('\ntier      n  lock   acc  false |  rot°  ctr·e  dep%  cell% |   ms');
+console.log('\ntier      n  lock   acc  false |  rot°  ctr·e  dep%  cell%  col%  cov% |   ms');
 for (const name of order) {
   const t = tiers[name];
   console.log(`${name.padEnd(6)} ${pad(t.n, 4)} ${pad(t.locked, 5)} ${pad(t.accurate, 5)} ${pad(t.falseLocks, 6)}`
     + ` | ${pad(fmt(median(t.rot)), 5)} ${pad(fmt(median(t.ctr), 2), 6)} ${pad(fmt(median(t.dep) * 100, 0), 5)}`
-    + ` ${pad(fmt(median(t.cell) * 100, 0), 6)} | ${pad(fmt(median(t.ms), 0), 4)}`);
+    + ` ${pad(fmt(median(t.cell) * 100, 0), 6)} ${pad(fmt(median(t.col) * 100, 0), 5)} ${pad(fmt(median(t.cov) * 100, 0), 5)} | ${pad(fmt(median(t.ms), 0), 4)}`);
 }
 
 const problems = records.filter(isProblem);

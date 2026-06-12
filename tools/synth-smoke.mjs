@@ -19,6 +19,7 @@ import { buildCubeScene, renderScene } from './synth-cube.mjs';
 import { detectAndSolveLines } from '../src/detect.js';
 import { canonicalizeRotation, rotationAngleDeg } from '../src/lines.js';
 import { project } from '../src/pose.js';
+import { readStickerColors, nearestFaceLetter } from '../src/read-colors.js';
 
 await new Promise((r) => { if (cv && cv.Mat) return r(); cv.onRuntimeInitialized = r; });
 
@@ -39,6 +40,9 @@ const SCENES = [
   // lateral cell under-constrained; guards the cell-hop translation fix that lands it on
   // the right sticker (the orthographic 3-face model + single search put it a cell off).
   { tag: 'edge-on 2-face', axis: '0.15,-1,0.1', angleDeg: 57, dist: 3, tx: 0.05, ty: -0.2 },
+  // Per-sticker colours: the colour-read check below is only conclusive here (on a
+  // solved cube a one-cell slip still reads the face's own colour).
+  { tag: 'corner-on A scrambled', axis: '0.9,-1,0.1', angleDeg: 57, dist: 4.5, scramble: 3 },
 ];
 
 const ANGLE_TOL = 8;     // recovered R within this many degrees of truth (mod symmetry)
@@ -75,6 +79,27 @@ for (const spec of SCENES) {
 
   const depthErr = Math.abs(fit.pose.t[2] - scene.pose.t[2]) / scene.pose.t[2];
   check(`[${spec.tag}] depth within ${(DEPTH_TOL * 100) | 0}%`, depthErr <= DEPTH_TOL, `${(depthErr * 100).toFixed(0)}%`);
+
+  // Colour read under the recovered (truth-aligned) pose. Graded over the cells the
+  // reader CLAIMS (weight > 0): a claimed-but-wrong colour is the real failure; a
+  // weight-0 cell (grazing face, off-frame) is a declared no-read — the live
+  // accumulator just waits for a better view of it. Claimed must still cover at
+  // least two full faces so the check can't pass by claiming nothing.
+  const reads = readStickerColors(imageData, scene.K, { R: Rc, t: fit.pose.t });
+  const byFace = new Map(reads.faces.map((f) => [`${f.k}${f.s}`, f]));
+  let colOk = 0, claimed = 0, colN = 0;
+  for (const g of scene.truth.facelets) {
+    const rf = byFace.get(`${g.k}${g.s}`);
+    g.cells.forEach((row, r) => row.forEach((cell, c) => {
+      colN++;
+      const rc = rf && rf.cells[r * 3 + c];
+      if (!rc || !(rc.weight > 0)) return;
+      claimed++;
+      if (nearestFaceLetter(rc.rgb) === cell.letter) colOk++;
+    }));
+  }
+  check(`[${spec.tag}] colours ${colOk}/${claimed} claimed (of ${colN})`,
+    colOk === claimed && claimed >= 18, `${colOk}/${claimed}`);
 }
 
 console.log(`\n${fail ? 'FAILED' : 'OK'} — ${pass} passed, ${fail} failure(s)`);
