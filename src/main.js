@@ -2,7 +2,7 @@ import { startCamera } from './camera.js';
 import { computeRegion, computeCornerRegion, sampleCorner, CORNER_CAPTURES } from './detection.js';
 import { toFaceletString, validate, aggregateFaces } from './cube-state.js';
 import { initSolver, solve } from './solver.js';
-import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawCube, drawSegments, drawLineGroups, drawCubeWireframe } from './overlay.js';
+import { drawGuide, drawCornerGuide, drawMove, drawDetections, drawCube, drawSegments, drawLineGroups, drawCubeWireframe, drawCellColors } from './overlay.js';
 import { glyphSVG } from './glyph.js';
 import { startCV, cvReady, requestDetect, latestQuads, latestSegments, latestLineSol } from './opencv.js';
 import { findFaceGrids, fitFaceGrid } from './group.js';
@@ -11,6 +11,7 @@ import { estimateIntrinsics, project } from './pose.js';
 import { DETECT_DEFAULTS, HOUGH_DEFAULTS } from './detect.js';
 import { groupLineSegments, solveCubeFromLines, smoothLinePose, canonicalizeRotation, rotationAngleDeg, VP_DEFAULTS, ROT_DEFAULTS, POSE_DEFAULTS, POSE_SMOOTH_DEFAULTS } from './lines.js';
 import { buildCubeScene, drawScene } from './synth.js';
+import { readStickerColors, accumulateStickerColors, overlayColors, nearestFaceLetter } from './read-colors.js';
 
 // Diagnostic harness for the OpenCV detector: open with ?detect to overlay
 // detected sticker quads on the live frame while tuning against a real cube.
@@ -23,7 +24,7 @@ const DEBUG_DETECT = new URLSearchParams(location.search).has('detect');
 // overlays the REAL hough pipeline on the generated frame, so you watch it lock onto
 // a known pose. The scene/draw core is shared with the node CLI via src/synth.js.
 const DEBUG_SYNTH = new URLSearchParams(location.search).has('synth');
-const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null, lastSegments: null, grouping: null, sol: null, smoothPose: null, K: null };
+const detectState = { frame: 0, lastStatus: '', lastQuads: null, quadCount: 0, cube: null, lastSegments: null, grouping: null, sol: null, smoothPose: null, K: null, colorRead: null, colorAccum: null, colorTruthRead: null };
 // Every query param besides the mode flags overrides a DETECT_DEFAULTS knob, so
 // detection can be tuned live from the URL without a rebuild, e.g.
 //   ?detect&method=adaptive&blockSize=51&C=7   or   ?detect&cannyLo=20&minFill=0.4
@@ -284,9 +285,29 @@ function saveSynth() {
 // raw camera image with none of our guide/arrow lines on them.
 function requestDetectFrame() {
   if (!cvReady()) return;
-  if (detectState.frame++ % 3 === 0) {
-    requestDetect(ctx.getImageData(0, 0, canvas.width, canvas.height), detectOpts);
+  if (detectState.frame++ % 3 !== 0) return;
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  // Sticker colours are read HERE — off the clean frame, BEFORE requestDetect
+  // transfers (detaches) its pixel buffer — under the latest smoothed pose (at most
+  // a few frames old; the lock is steady by construction, so it lands on the same
+  // cells). Reads accumulate per body-frame cell for as long as the lock is
+  // continuous (the accumulator is cleared on release/re-acquire, where the
+  // smoothed pose's symmetry rep — hence the cell keying — can change).
+  const sm = detectState.smoothPose;
+  if (detectOpts.method === 'hough' && sm) {
+    const K = detectState.K || estimateIntrinsics(canvas.width, canvas.height);
+    detectState.colorRead = readStickerColors(img, K, sm, detectOpts);
+    detectState.colorAccum = accumulateStickerColors(detectState.colorAccum, detectState.colorRead, detectOpts);
+    // ?synth: a second read under the truth-ALIGNED pose, so the status line can
+    // grade letters against the known scene index-for-index (the display read's
+    // body frame is an arbitrary symmetry rep — its indices don't match truth's).
+    detectState.colorTruthRead = DEBUG_SYNTH && synthState.scene
+      ? readStickerColors(img, K, { R: canonicalizeRotation(sm.R, synthState.scene.pose.R), t: sm.t }, detectOpts)
+      : null;
+  } else {
+    detectState.colorRead = detectState.colorAccum = detectState.colorTruthRead = null;
   }
+  requestDetect(img, detectOpts);
 }
 
 // ?synth only: grade a recovered pose against the scene's KNOWN truth (centre offset as
@@ -301,6 +322,33 @@ function truthError(pose) {
   const rot = rotationAngleDeg(tp.R, canonicalizeRotation(pose.R, tp.R));
   const depth = Math.abs(pose.t[2] - tp.t[2]) / (tp.t[2] || 1) * 100;
   return ` · <b>vs truth</b> centre ${centre.toFixed(0)}% rot ${rot.toFixed(0)}° depth ${depth.toFixed(0)}%`;
+}
+
+// Status fragment for the colour read: how many cells the reader currently claims
+// (weight > 0). Under ?synth, also grade the truth-aligned read's nearest-palette
+// letters against the known scene — precision over claimed cells, live (same metric
+// as tools/synth-bench.mjs colorRate).
+function colourStatus() {
+  const read = detectState.colorRead;
+  if (!read) return '';
+  let claimed = 0;
+  for (const f of read.faces) for (const c of f.cells) if (c.weight > 0) claimed++;
+  let truth = '';
+  const tr = detectState.colorTruthRead, scene = synthState.scene;
+  if (tr && scene) {
+    let okC = 0, n = 0;
+    for (const g of scene.truth.facelets) {
+      const rf = tr.faces.find((f) => f.k === g.k && f.s === g.s);
+      g.cells.forEach((row, r) => row.forEach((cell, c) => {
+        const rc = rf && rf.cells[r * 3 + c];
+        if (!rc || !(rc.weight > 0)) return;
+        n++;
+        if (nearestFaceLetter(rc.rgb) === cell.letter) okC++;
+      }));
+    }
+    truth = `, <b>${okC}/${n}</b> right`;
+  }
+  return ` · colours ${claimed}${truth}`;
 }
 
 // On each fresh detection result, group -> fit -> temporally smooth; draw the
@@ -331,7 +379,18 @@ function drawDetectResults() {
       // through dropouts) so the overlay is steady instead of flickering right/wrong.
       // sol.fit is the recoverCubePose result; the metric {R,t} is sol.fit.pose.
       const fit = detectState.sol && detectState.sol.fit;
-      detectState.smoothPose = smoothLinePose(detectState.smoothPose, fit && fit.locked ? fit.pose : null, detectOpts);
+      const prevSm = detectState.smoothPose;
+      detectState.smoothPose = smoothLinePose(prevSm, fit && fit.locked ? fit.pose : null, detectOpts);
+      // The colour accumulator is keyed in the smoothed pose's body frame, which is
+      // only stable while the lock is continuous: clear it when the lock releases or
+      // re-acquires onto a different pose (a real move — within-gate blends shift R
+      // far less than the gate angle, a re-acquire jumps past it).
+      const cur = detectState.smoothPose;
+      if (!cur || (prevSm && rotationAngleDeg(canonicalizeRotation(cur.R, prevSm.R), prevSm.R) >
+          (detectOpts.poseGateAngle ?? POSE_SMOOTH_DEFAULTS.poseGateAngle))) {
+        detectState.colorAccum = null;
+        detectState.colorRead = null;
+      }
     }
     const g = detectState.grouping, sol = detectState.sol, sm = detectState.smoothPose;
     const fit = sol && sol.fit;
@@ -339,6 +398,9 @@ function drawDetectResults() {
     else drawSegments(ctx, segments);
     if (sm) drawCubeWireframe(ctx, detectState.K, sm, '#39ff14');
     else if (sol && sol.rot.pose) drawCubeWireframe(ctx, detectState.K, sol.rot.pose, 'rgba(150,160,175,0.55)');
+    // Raw-RGB swatches of what the colour reader sampled at each locked cell
+    // (accumulated across the lock where available — the steadier mean).
+    if (sm && detectState.colorRead) drawCellColors(ctx, overlayColors(detectState.colorRead, detectState.colorAccum));
     const counts = g && g.families.length ? g.families.map((f) => f.segments.length).join('/') : '—';
     // In ?synth the ground-truth pose is known, so grade the DISPLAYED (smoothed) lock
     // against it — the whole point of ?synth is watching the detector hit a known pose,
@@ -346,7 +408,7 @@ function drawDetectResults() {
     // the cube differently than skia, so segments — and the lock — differ from synth-smoke).
     setDetectStatus(
       `detect[hough]: <b>${segments.length}</b> segs · families <b>${counts}</b>` +
-      (sm ? ` · <b>LOCK</b>${fit && fit.locked ? ` ${fit.count}pts ${fit.reprojErr.toFixed(1)}px` : ' (held)'}` + truthError(sm)
+      (sm ? ` · <b>LOCK</b>${fit && fit.locked ? ` ${fit.count}pts ${fit.reprojErr.toFixed(1)}px` : ' (held)'}` + truthError(sm) + colourStatus()
         : sol ? ' · searching' : ' · no R'));
     return;
   }

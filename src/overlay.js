@@ -260,6 +260,32 @@ export function drawCubeWireframe(ctx, K, pose, color = '#39ff14') {
   ctx.restore();
 }
 
+// Filled swatch at each cell centre of a colour read (read-colors.js faces) — the
+// raw sampled/accumulated RGB, deliberately NOT classified, so the overlay shows
+// exactly what the reader sees. Dim = the reader assigned the cell no weight
+// (grazing face, off-frame patch). Radius follows the projected cell pitch so
+// swatches scale with the cube's distance.
+export function drawCellColors(ctx, faces) {
+  ctx.save();
+  for (const f of faces) {
+    const a = f.cells[0].px, b = f.cells[1].px; // adjacent columns = the cell pitch
+    const rad = Math.max(3, Math.min(16, Math.hypot(b[0] - a[0], b[1] - a[1]) * 0.28));
+    for (const c of f.cells) {
+      if (!c.rgb) continue;
+      ctx.globalAlpha = c.weight > 0 ? 1 : 0.35;
+      ctx.fillStyle = `rgb(${Math.round(c.rgb.r)},${Math.round(c.rgb.g)},${Math.round(c.rgb.b)})`;
+      ctx.beginPath();
+      ctx.arc(c.px[0], c.px[1], rad, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
 // Debug overlay for grouping: draw each recovered cube face's cells in a distinct
 // colour and connect adjacent grid cells, so the 3x3 lattices found among the
 // detected quads (and the rejection of clutter) are visible live. Geometry only.

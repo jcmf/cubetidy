@@ -152,7 +152,12 @@ gaps / next steps:
     First find (2026-06): `imgBlur=2` triggered one-cell translation aliasing on ~10
     scenes — fixed by the step-3e adaptive Canny retry; scenes that locked via the
     retry are marked `*`. Remaining in-regime gap: rare wrong-R locks under heavy
-    blur+noise (`tilted-d4.5-soft`). The
+    blur+noise (`tilted-d4.5-soft`). Bench and smoke also grade the COLOUR READER
+    (step 4) under the recovered truth-aligned pose: `colorRate` = precision over the
+    cells the reader CLAIMS (weight > 0), `colorCover` = claimed fraction — split that
+    way because a weight-0 cell is a declared no-read (grazing face), not a misread;
+    only scrambled scenes catch one-cell slips (solved looks read the face's own
+    colour either way). The
     scene/draw core is BROWSER-SAFE (no skia/fs — those stay in the CLI) and shared
     with the in-page **`?synth`** harness (`main.js`): a synthetic cube replaces the
     camera as the frame source, with a tuning panel on the LEFT (pose/appearance
@@ -273,8 +278,34 @@ gaps / next steps:
     `retryMargin`. Result: bench in-regime false locks 10→1 (the 1 is a wrong-R case,
     a different failure class), all real-frame locks/non-locks unchanged (ceiling3's
     retry even pulls its edge estimate in line with its burst siblings).
-  - **Next:** read sticker colours off the locked grid cells to assemble the facelet
-    string (the 24-fold R disambiguates once colours are known).
+  - **Step 4 (done): read sticker colours off the locked grid** (`src/read-colors.js`,
+    pure + browser-safe). `readStickerColors(imageData, K, pose)` projects each
+    genuinely-visible face's nine cell centres (perspective-correct `visibleCubeFaces`,
+    shared from pose.js with the synth renderer), samples a 5×5 patch of real 3D
+    points inside the inner half of each sticker, and reduces to a median RGB plus a
+    confidence `weight` (view cosine × in-frame fraction ÷ patch scatter) — a grazing
+    face or glare boundary weighs ~0 instead of misreading, so PRECISION over claimed
+    cells is the quality bar and coverage is a separate number. Faces are keyed by
+    BODY-frame axis (k ∈ 0..2, s = ±1), cells row-major exactly like buildCubeScene's
+    truth facelets, so a truth-aligned (`canonicalizeRotation`'d) pose grades
+    index-for-index; which face LETTER a (k,s) is stays unknown until the six centre
+    colours are classified (the 24-fold R ambiguity). `accumulateStickerColors` (pure,
+    state in/out like smoothLinePose) weighted-means each sticker across frames —
+    view-dependent glare averages out; keys are only stable while the lock is
+    continuous, so main.js clears it when the smoother releases or re-acquires.
+    TESTING: `test/read-colors.test.mjs` runs in `npm test` against REAL rendered
+    pixels — drawScene needs only createImageData/putImageData, so a stub context
+    rasterizes scenes in plain node and the reader samples at the TRUTH pose (the
+    scrambled scene pins the indexing against transposition/mirroring); reads under a
+    RECOVERED pose are graded by smoke + bench (in-regime medians 100%@100%). LIVE:
+    `?detect&method=hough` / `?synth&detect` draw raw-RGB swatches on the locked cells
+    (`drawCellColors`); the read happens in requestDetectFrame BEFORE the frame buffer
+    is transferred to the worker (transfer detaches it); under ?synth the status line
+    grades claimed letters against truth live.
+  - **Next:** assemble the facelet string: classify the accumulated 27-per-corner
+    colours (balanced k-means, colors.js) once coverage suffices, identify faces by
+    their CENTRE colours (resolves the 24-fold R and registers the two opposite-corner
+    captures without trusting the user's flip), validate + solve.
 - The `?detect` harness has an **on-page tuning panel** (`buildDetectPanel` in
   `main.js`, `#detect-panel` styles) so the detector's knobs are sliders + a method
   dropdown, not query-string edits. Sliders are schema-driven (`DETECT_PARAMS`,
