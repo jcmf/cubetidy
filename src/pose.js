@@ -136,6 +136,28 @@ export function project(K, pose, X) {
   return [K.f * Xc[0] / Xc[2] + K.cx, K.f * Xc[1] / Xc[2] + K.cy];
 }
 
+// The unit-cube faces actually facing the camera at pose (R, t). A planar face is
+// visible when its outward normal points back toward the camera: Nc·Cc < 0, where
+// Nc = R·(s·e_k) is the normal and Cc = R·(s/2·e_k)+t the face centre, both in
+// camera coords. This is the PERSPECTIVE-correct test and DELIBERATELY differs from
+// the detector's orthographic visibleFaces in src/lines.js (s·R[2][k]<0, always 3):
+// that optical-axis approximation misjudges a near-edge-on face when the cube is
+// close AND laterally offset — a back face whose centre is off-axis can still score
+// s·R[2][k]<0. The detector keeps the simple always-corner-on prior; anything that
+// renders or samples real pixels (synth.js, read-colors.js) must be physically
+// correct. Returns the genuine visible set (1–3 faces, each { k, s, depth }),
+// farthest-first for painter order.
+export function visibleCubeFaces(R, t) {
+  const faces = [];
+  for (let k = 0; k < 3; k++) for (const s of [-1, 1]) {
+    const nx = R[0][k] * s, ny = R[1][k] * s, nz = R[2][k] * s;             // normal, camera coords
+    const cx = nx * 0.5 + t[0], cy = ny * 0.5 + t[1], cz = nz * 0.5 + t[2]; // face centre, camera coords
+    if (nx * cx + ny * cy + nz * cz < 0) faces.push({ k, s, depth: cz });
+  }
+  faces.sort((a, b) => b.depth - a.depth); // farthest first
+  return faces;
+}
+
 // Map a planar point [x, y] through a 3x3 homography to [u, v].
 export function applyHomography(H, [x, y]) {
   const w = H[2][0] * x + H[2][1] * y + H[2][2];
