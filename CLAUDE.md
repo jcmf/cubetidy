@@ -278,6 +278,28 @@ gaps / next steps:
     `retryMargin`. Result: bench in-regime false locks 10→1 (the 1 is a wrong-R case,
     a different failure class), all real-frame locks/non-locks unchanged (ceiling3's
     retry even pulls its edge estimate in line with its burst siblings).
+  - **Step 3f (done): clutter fallback — balance-ranked alternate frames.** Real
+    failure (samples/cluttered.png, venetian blinds + plaid shirt): the orthogonal-VP
+    RANSAC scores frames by TOTAL inlier length, so a parallel background bundle
+    claims one axis on sheer length and MANY distinct (d2,d3) completions ride its
+    weight — a raw-weight top-K floods with fabrications and the cube's true frame
+    never surfaces (it was 29–46° from every kept candidate). Fix in
+    `estimateRotationFromLines`: the primary stays the raw-weight winner (bit-exact
+    old behaviour), but it also returns `alts` — the top-`vpCandidates` mutually
+    DISTINCT frames (mod the 24 symmetries, ≥12° apart) ranked by BALANCE = minimum
+    per-axis inlier length (a corner-on cube puts real length on all three axes;
+    clutter frames are lopsided). `solveCubeFromLines` falls through the alts only
+    when the primary fails the gate, and holds an alternate's lock to a HARDER
+    two-arm bar: cover ≥ `altMinCover` (0.7) AND reproj ≤ `altMaxReproj` (0.06·edge)
+    — K tries against the far-regime-weak gate is a multiple-comparisons problem,
+    and without the bar it confidently locked wrong frames on 5 far samples
+    (measured: true alt locks 0.73+/≤5.8%·e, every false one fails an arm:
+    0.705/7.2%, 0.64/4.4%, …). Result: cluttered locks dead-on, corner2 improves
+    (20pts/3.2%·e), corner4 — never locked before — locks tight via retry+alts
+    (32pts/2.4%·e), every other sample and the whole bench unchanged. KNOWN
+    remaining class (deliberate): clutter within ~3° of a cube axis is ABSORBED into
+    that family and corrupts the translation anchor instead of stealing the frame
+    (test fixture comment in lines.test.mjs documents it).
   - **Step 4 (done): read sticker colours off the locked grid** (`src/read-colors.js`,
     pure + browser-safe). `readStickerColors(imageData, K, pose)` projects each
     genuinely-visible face's nine cell centres (perspective-correct `visibleCubeFaces`,

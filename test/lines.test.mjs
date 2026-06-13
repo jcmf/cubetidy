@@ -360,6 +360,51 @@ function cubeGridSegments(R, t, rand) {
   check('pose: clutter-only scene does not lock', !est || !est.locked, est ? `count=${est.count} err=${est.reprojErr.toFixed(2)}` : 'no rot');
 })();
 
+(() => {
+  // Clutter fallback: a dominant PARALLEL background bundle (venetian blinds, a
+  // shelf) outweighs the cube on raw inlier length, so the heaviest orthogonal
+  // frame is a background fabrication — but the cube's true frame survives in the
+  // balance-ranked alternates and the pose gate (plus the harder alt bar)
+  // arbitrates. This is the samples/cluttered.png failure in miniature. The bundle
+  // is tilted ~25° off every cube family: clutter within ~3° of a cube axis gets
+  // ABSORBED into its family instead (a separate, rarer failure — it corrupts the
+  // translation anchor rather than stealing the frame, and isn't handled here).
+  const R = rotationAxisAngle([0.9, -1, 0.1], 1.0);
+  const t = [0.3, -0.2, 7];
+  const rand = rng(99);
+  const segments = cubeGridSegments(R, t, rand);
+  const cubeLen = segments.reduce((a, s) => a + Math.hypot(s.x2 - s.x1, s.y2 - s.y1), 0);
+  const slope = Math.tan(-25 * Math.PI / 180);
+  let blindLen = 0;
+  for (let i = 0; i < 30; i++) { // long parallel "blinds" spanning most of the frame
+    const x1 = 40 + rand() * 40, x2 = x1 + 700 + rand() * 60;
+    const y1 = 60 + i * 20 + (rand() - 0.5) * 2;
+    const seg = { x1, y1, x2, y2: y1 + (x2 - x1) * slope + (rand() - 0.5) * 3 };
+    blindLen += Math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1);
+    segments.push(seg);
+  }
+  check('fallback scenario: blinds outweigh the cube (precondition)', blindLen > 2 * cubeLen,
+    `blinds=${blindLen.toFixed(0)} cube=${cubeLen.toFixed(0)}`);
+
+  // The HEAVIEST frame is the background fabrication, not the cube…
+  const rot = estimateRotationFromLines(segments, K, { vpMaxErrorDeg: 3 });
+  check('fallback scenario: heaviest frame is NOT the cube (precondition)',
+    rot && rotAgree(R, rot.R) < 0.99, rot ? `agree=${rotAgree(R, rot.R).toFixed(3)}` : 'no rot');
+
+  // …yet the full solve still locks onto the cube via the alternates.
+  const sol = solveCubeFromLines(segments, K, {});
+  const fit = sol && sol.fit;
+  check('fallback: solve locks despite the dominant bundle', !!(fit && fit.locked),
+    fit ? `count=${fit.count} cover=${(fit.cover || 0).toFixed(2)}` : 'no fit');
+  if (fit && fit.locked) {
+    check('fallback: locked rotation matches truth (mod symmetry)', rotAgree(R, fit.pose.R) > 0.99,
+      `agree=${rotAgree(R, fit.pose.R).toFixed(4)}`);
+    const dt = Math.hypot(fit.pose.t[0] - t[0], fit.pose.t[1] - t[1], fit.pose.t[2] - t[2]);
+    check('fallback: locked translation matches truth', dt / Math.hypot(...t) < 0.1,
+      `rel dt=${(dt / Math.hypot(...t)).toFixed(3)}`);
+  }
+})();
+
 // --- temporal smoothing (24-fold-symmetry aware) -------------------------------
 
 (() => {

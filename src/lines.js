@@ -270,6 +270,9 @@ export const ROT_DEFAULTS = {
   vpMaxErrorDeg: 3,    // a line within this angle of a VP is an inlier (shared with grouping)
   vpRansac: 600,       // RANSAC hypotheses for the orthogonal VP triple
   vpMinLen: 14,        // only segments at least this long seed/refine the model
+  vpCandidates: 4,     // distinct orthogonal frames kept for the clutter fallback
+                       //   (solveCubeFromLines tries them in turn when the heaviest
+                       //   frame fails the pose gate)
 };
 
 // Fit a 3D direction common to a set of image lines: the direction d most orthogonal
@@ -298,15 +301,16 @@ function scoreTriple(normals, lens, dirs, maxErr) {
   let weight = 0;
   const assign = new Array(normals.length).fill(-1);
   const counts = [0, 0, 0];
+  const axisW = [0, 0, 0]; // per-axis inlier length — min(axisW) is the balance score
   for (let i = 0; i < normals.length; i++) {
     let best = -1, bestE = Infinity;
     for (let c = 0; c < 3; c++) {
       const e = Math.asin(Math.min(1, Math.abs(dot3(normals[i], dirs[c]))));
       if (e < bestE) { bestE = e; best = c; }
     }
-    if (bestE <= maxErr) { assign[i] = best; weight += lens[i]; counts[best]++; }
+    if (bestE <= maxErr) { assign[i] = best; weight += lens[i]; counts[best]++; axisW[best] += lens[i]; }
   }
-  return { assign, weight, counts };
+  return { assign, weight, counts, axisW };
 }
 
 // A vanishing point at/near the principal point (direction ≈ optical axis) is a false
@@ -344,6 +348,38 @@ export function estimateRotationFromLines(segments, K, opts = {}) {
   const rand = rng(0x9e3779b1);
   const pick = () => longIdx[(rand() * longIdx.length) | 0];
 
+  // Besides the single heaviest frame (the primary — unchanged semantics), keep the
+  // top-K mutually-DISTINCT frames (mod the cube's 24 symmetries) ranked by BALANCE
+  // (minimum per-axis inlier length). Under heavy clutter the heaviest frames are
+  // background fabrications — a venetian-blind/shelf bundle claims one axis on sheer
+  // length and MANY distinct (d2,d3) completions ride its weight, flooding any
+  // raw-weight top-K — but they're extremely lopsided, while a corner-on cube puts
+  // real length on all three axes. solveCubeFromLines falls back through these
+  // balance-ranked alternates when the primary fails the pose gate; the gate
+  // arbitrates, so a balanced clutter frame still can't produce a false lock.
+  const kCand = Math.max(1, o.vpCandidates | 0);
+  const cands = []; // { dirs, bal, Rc } sorted by bal desc
+  const asR = (d) => [
+    [d[0][0], d[1][0], d[2][0]],
+    [d[0][1], d[1][1], d[2][1]],
+    [d[0][2], d[1][2], d[2][2]],
+  ];
+  const keep = (dirs, bal) => {
+    // When full, anything at-or-below the weakest kept frame can change nothing:
+    // a distinct frame wouldn't be inserted, and a near-duplicate could only
+    // replace a frame that already outranks it.
+    if (cands.length >= kCand && bal <= cands[cands.length - 1].bal) return;
+    const Rc = asR(dirs);
+    const i = cands.findIndex((c) => rotationAngleDeg(c.Rc, canonicalizeRotation(Rc, c.Rc)) < 12);
+    if (i >= 0) {
+      if (bal <= cands[i].bal) return;
+      cands.splice(i, 1);
+    }
+    const at = cands.findIndex((c) => c.bal < bal);
+    cands.splice(at < 0 ? cands.length : at, 0, { dirs, bal, Rc });
+    if (cands.length > kCand) cands.pop();
+  };
+
   let bestDirs = null, bestWeight = -Infinity;
   for (let it = 0; it < o.vpRansac; it++) {
     const i1 = pick(), i2 = pick();
@@ -359,59 +395,72 @@ export function estimateRotationFromLines(segments, K, opts = {}) {
     const d3 = cross3(d1, d2);
     const dirs0 = [d1, d2, d3];
     if (axisDegenerate(dirs0)) continue;
-    const { weight, counts } = scoreTriple(normals, lens, dirs0, maxErr);
+    const { weight, counts, axisW } = scoreTriple(normals, lens, dirs0, maxErr);
     // Require all three axes to have real support, so a single attractor can't win on
     // total weight alone — the cube shows all three edge directions corner-on.
     if (Math.min(counts[0], counts[1], counts[2]) < 2) continue;
     if (weight > bestWeight) { bestWeight = weight; bestDirs = dirs0; }
+    keep(dirs0, Math.min(axisW[0], axisW[1], axisW[2]));
   }
   if (!bestDirs) return null;
 
+  // Refine + package one candidate frame (the former single-best tail, per candidate).
   // Refine: reassign inliers, refit each direction (3D eigen-fit), re-orthonormalize.
   // The refit is UNGUARDED, so it can drift toward the optical-axis attractor; accept a
   // pass only if it keeps the frame non-degenerate with all three axes supported, else
   // keep the (balanced) RANSAC frame.
-  let dirs = bestDirs;
-  for (let pass = 0; pass < 2; pass++) {
-    const { assign } = scoreTriple(normals, lens, dirs, maxErr);
-    const refit = [];
-    const support = [0, 0, 0];
-    for (let c = 0; c < 3; c++) {
-      const ns = [], ws = [];
-      for (let i = 0; i < lines.length; i++) if (assign[i] === c && lines[i].len >= o.vpMinLen) { ns.push(normals[i]); ws.push(lines[i].len); support[c] = (support[c] || 0) + lines[i].len; }
-      refit[c] = ns.length >= 2 ? normalize3(fitDirection(ns, ws)) : dirs[c];
+  const finish = (dirs0, weight) => {
+    let dirs = dirs0;
+    for (let pass = 0; pass < 2; pass++) {
+      const { assign } = scoreTriple(normals, lens, dirs, maxErr);
+      const refit = [];
+      const support = [0, 0, 0];
+      for (let c = 0; c < 3; c++) {
+        const ns = [], ws = [];
+        for (let i = 0; i < lines.length; i++) if (assign[i] === c && lines[i].len >= o.vpMinLen) { ns.push(normals[i]); ws.push(lines[i].len); support[c] = (support[c] || 0) + lines[i].len; }
+        refit[c] = ns.length >= 2 ? normalize3(fitDirection(ns, ws)) : dirs[c];
+      }
+      // Gram-Schmidt anchored on the best-supported axis, so noise doesn't tilt the frame.
+      const order = [0, 1, 2].sort((a, b) => support[b] - support[a]);
+      const a0 = normalize3(refit[order[0]]);
+      let a1 = refit[order[1]];
+      a1 = normalize3([a1[0] - dot3(a1, a0) * a0[0], a1[1] - dot3(a1, a0) * a0[1], a1[2] - dot3(a1, a0) * a0[2]]);
+      const a2 = cross3(a0, a1);
+      const nd = [];
+      nd[order[0]] = a0; nd[order[1]] = a1; nd[order[2]] = a2;
+      if (axisDegenerate(nd)) break;
+      const chk = scoreTriple(normals, lens, nd, maxErr);
+      if (Math.min(chk.counts[0], chk.counts[1], chk.counts[2]) < 2) break;
+      dirs = nd;
     }
-    // Gram-Schmidt anchored on the best-supported axis, so noise doesn't tilt the frame.
-    const order = [0, 1, 2].sort((a, b) => support[b] - support[a]);
-    const a0 = normalize3(refit[order[0]]);
-    let a1 = refit[order[1]];
-    a1 = normalize3([a1[0] - dot3(a1, a0) * a0[0], a1[1] - dot3(a1, a0) * a0[1], a1[2] - dot3(a1, a0) * a0[2]]);
-    const a2 = cross3(a0, a1);
-    const nd = [];
-    nd[order[0]] = a0; nd[order[1]] = a1; nd[order[2]] = a2;
-    if (axisDegenerate(nd)) break;
-    const chk = scoreTriple(normals, lens, nd, maxErr);
-    if (Math.min(chk.counts[0], chk.counts[1], chk.counts[2]) < 2) break;
-    dirs = nd;
-  }
-  // Enforce a proper rotation (det +1); flipping an axis is just another symmetry.
-  if (dot3(dirs[0], cross3(dirs[1], dirs[2])) < 0) dirs[2] = [-dirs[2][0], -dirs[2][1], -dirs[2][2]];
+    // Enforce a proper rotation (det +1); flipping an axis is just another symmetry.
+    if (dot3(dirs[0], cross3(dirs[1], dirs[2])) < 0) dirs[2] = [-dirs[2][0], -dirs[2][1], -dirs[2][2]];
 
-  const vps = dirs.map((d) => Kd(K, d));
-  const { assign } = scoreTriple(normals, lens, dirs, maxErr);
-  const families = [0, 1, 2].map((c) => ({ vp: vps[c], segments: [] }));
-  const outliers = [];
-  for (let i = 0; i < segments.length; i++) {
-    if (assign[i] >= 0) families[assign[i]].segments.push(segments[i]);
-    else outliers.push(segments[i]);
-  }
-  const R = [
-    [dirs[0][0], dirs[1][0], dirs[2][0]],
-    [dirs[0][1], dirs[1][1], dirs[2][1]],
-    [dirs[0][2], dirs[1][2], dirs[2][2]],
-  ];
+    const vps = dirs.map((d) => Kd(K, d));
+    const { assign } = scoreTriple(normals, lens, dirs, maxErr);
+    const families = [0, 1, 2].map((c) => ({ vp: vps[c], segments: [] }));
+    const outliers = [];
+    for (let i = 0; i < segments.length; i++) {
+      if (assign[i] >= 0) families[assign[i]].segments.push(segments[i]);
+      else outliers.push(segments[i]);
+    }
+    const R = [
+      [dirs[0][0], dirs[1][0], dirs[2][0]],
+      [dirs[0][1], dirs[1][1], dirs[2][1]],
+      [dirs[0][2], dirs[1][2], dirs[2][2]],
+    ];
+    return { R, pose: roughPose(R, families, K), families, outliers, inlierLen: weight };
+  };
 
-  return { R, pose: roughPose(R, families, K), families, outliers, inlierLen: bestWeight };
+  // Primary = the raw-weight winner, exactly as before. Alternates = the balanced
+  // top-K, minus any frame that's just the primary again, finished lazily-cheap
+  // (refine + families are a small cost next to the RANSAC itself).
+  const primary = finish(bestDirs, bestWeight);
+  const Rp = asR(bestDirs);
+  const alts = cands
+    .filter((c) => rotationAngleDeg(Rp, canonicalizeRotation(c.Rc, Rp)) >= 12)
+    .map((c) => finish(c.dirs, c.bal));
+  return { ...primary, alts };
 }
 
 // A rough pose to seed the metric refinement (and to draw the untrusted overlay):
@@ -444,6 +493,10 @@ export const POSE_DEFAULTS = {
   minCover: 0.45,       // ...and at least this fraction of detected line length on the grid
   vpSweep: [3, 4, 5, 6],// inlier angles (deg) solveCubeFromLines tries; the best lock wins
   hopMargin: 1.04,      // adopt a ±1-cell translation hop only if it beats the phase cover ×this
+  altMinCover: 0.7,     // a fallback-frame lock must clear BOTH of these — the plain gate
+  altMaxReproj: 0.06,   //   alone is too weak against K tries on far/near-affine frames
+                        //   (measured: true alt locks 0.73+/≤5.8%·e; false ones each fail
+                        //   an arm — 0.705/7.2%, 0.64/4.4%, …)
 };
 
 // A 3×3 face is split by lines at these offsets (±½ boundaries, ±1/6 internal) along
@@ -769,8 +822,29 @@ export function solveCubeFromLines(segments, K, opts = {}) {
     const o2 = { ...opts, vpMaxErrorDeg: deg };
     const rot = estimateRotationFromLines(segments, K, o2);
     if (!rot) continue;
-    const fit = recoverCubePose(rot, K, o2);
-    const cand = { rot, fit };
+    let used = rot, fit = recoverCubePose(rot, K, o2);
+    // Clutter fallback: when the heaviest orthogonal frame fails to lock, fall
+    // through the balance-ranked alternates and take the first that locks — this is
+    // what recovers a cube whose true frame is outweighed by a background bundle
+    // (the venetian-blind / plaid-shirt failure). CRUCIALLY the alternates are held
+    // to a HARDER standard than the plain gate: trying K frames against a gate that
+    // is weak on far/near-affine frames is a multiple-comparisons problem, and
+    // without the extra bar it confidently locked wrong frames that the single-best
+    // path correctly missed (corner3/5/6, b4, checkerboard). Measured: true
+    // alternate locks clear cover ≥0.73 at ≤5.8%·edge reprojection; every false one
+    // fails one arm or the other (0.705/7.2%, 0.64/4.4%, 0.46/10.4%, …).
+    if (!(fit && fit.locked)) {
+      const minCov = o2.altMinCover ?? POSE_DEFAULTS.altMinCover;
+      const maxRep = o2.altMaxReproj ?? POSE_DEFAULTS.altMaxReproj;
+      for (const alt of rot.alts ?? []) {
+        const f = recoverCubePose(alt, K, o2);
+        if (f && f.locked && f.cover >= minCov && f.reprojErr <= maxRep * f.edgePx) { used = alt; fit = f; break; }
+      }
+    }
+    // Strip alts from the kept result: downstream (worker postMessage, overlays)
+    // only ever uses the chosen frame, and alts carry whole segment arrays.
+    const { alts: _alts, ...rotLean } = used;
+    const cand = { rot: rotLean, fit };
     if (!best) { best = cand; continue; }
     const la = best.fit && best.fit.locked, lb = fit && fit.locked;
     if (la !== lb) { if (lb) best = cand; }

@@ -99,6 +99,10 @@ const DETECT_PARAMS = [
   { k: 'vpMaxErrorDeg', label: 'VP max err°',  min: 0.5,    max: 15,  step: 0.5,    methods: ['hough'] },
   { k: 'vpIters',     label: 'VP iters',       min: 1,      max: 12,  step: 1,      methods: ['hough'] },
   { k: 'vpRansac',    label: 'VP RANSAC',      min: 50,     max: 2000, step: 50,     methods: ['hough'] },
+  // clutter fallback: alternate orthogonal frames tried when the heaviest fails the
+  // gate, and the harder cover bar an alternate's lock must clear (see lines.js).
+  { k: 'vpCandidates', label: 'VP candidates', min: 1,      max: 8,   step: 1,      methods: ['hough'] },
+  { k: 'altMinCover', label: 'Alt min cover',  min: 0.45,   max: 1,   step: 0.05,   methods: ['hough'] },
   // metric pose + confidence gate (step 3)
   { k: 'minCorr',     label: 'Min corners',    min: 4,      max: 30,  step: 1,      methods: ['hough'] },
   { k: 'maxReprojFrac', label: 'Max reproj',   min: 0.02,   max: 0.3, step: 0.01,   methods: ['hough'] },
